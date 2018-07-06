@@ -1,0 +1,607 @@
+#Requires -Version 5
+
+. "$PSScriptRoot\RESWM-Classes.ps1"
+
+#region helper functions
+
+<#
+.Synopsis
+   Check if cache location is still reachable
+#>
+function Test-CacheConnection
+{
+    [CmdletBinding()]
+    Param()
+    If ($RESWMCache)
+    {
+        $Computer = $RESWMCache.FullName.Split('\')[2]
+        If ($Computer -ne 'localhost')
+        {
+            foreach ($Time in (1..4))
+            {
+                If (Test-Connection $Computer -Count 1 -Quiet)
+                {
+                    return
+                }
+                else
+                {
+                    sleep -Milliseconds 3
+                }
+            }
+            Write-Error -Message "Connection to cache on $Computer is lost." -Category ConnectionError -TargetObject $Computer -RecommendedAction "Connect to a differrent computer." -ErrorAction Stop
+        }
+    }
+    else
+    {
+        Write-Error "Not connected to RES WM cache" -Category ConnectionError -RecommendedAction "Run command Connect-RESWMCache"
+    }
+}
+
+<#
+.Synopsis
+   Get a RES WM object from a cache xml
+.DESCRIPTION
+   Get a RES WM object from a cache xml
+.EXAMPLE
+   Get-RESWMObject -Source Objects\apps.xml -Node application -Filter "enabled = 'yes'"
+#>
+function Get-RESWMObject
+{
+    [CmdletBinding()]
+    [OutputType([XmlNode])]
+    Param
+    (
+        # Source XML file relative to cache folder
+        [Parameter(Mandatory=$true)]
+        [string]
+        $Source,
+
+        # Name of the node we need
+        [Parameter(Mandatory=$true)]
+        [string]
+        $Node,
+
+        # Filter using Xpath
+        [string]
+        $Filter
+    )
+    
+    Test-CacheConnection
+    If ($PSBoundParameters['Filter'])
+    {
+        # Make filter case-insensitive Xpath 1.0 style
+        $Property = "translate($($Filter.Split('=').Trim()[0]),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')"
+        $Value = $Filter.Split('=').Trim()[1].ToLower()
+
+        If ($Value -match "^'(\*)?([^\*]+)(\*)?'$")
+        {
+            # Convert wildcards to Xpath 1.0 queries
+            switch (($Matches.Keys | measure -Sum).Sum)
+            {
+                2 {$FullFilter = "[$Property = $Value]"}
+                3 {$FullFilter = "[('$($Matches[2])' = substring($Property,string-length($($Filter.Split('=').Trim()[0]))-string-length('$($Matches[2])')+1))]"}
+                5 {$FullFilter = "[(starts-with($Property,'$($Matches[2])'))]"}
+                6 {$FullFilter = "[contains($Property,'$($Matches[2])')]"}
+            }
+        }
+        else
+        {
+            Write-Error 'Wildcards are only supported on the start and/or at end of the string' -Category InvalidArgument -ErrorAction Stop
+        }
+    }
+    If ($Node -eq 'application')
+    {
+        Select-Xml -Path $RESWMCache\$Source -XPath "//$Node$FullFilter" | select -ExpandProperty Node
+    }
+    else
+    {
+        Select-Xml -Path $RESWMCache\$Source -XPath "//$Node$FullFilter" | select -ExpandProperty Node | Set-CapitalizedXMLValues -PassThru
+    }
+}
+
+# Make sure all values in XML have a capitilized first letter
+function Set-CapitalizedXMLValues
+{
+    [CmdletBinding()]
+    [OutputType([XmlNode])]
+    Param(
+        [Parameter(Mandatory=$true,
+                   ValueFromPipeline=$true)]
+        [XmlNode]
+        $XmlNode,
+
+        [switch]
+        $PassThru
+    )
+    Process 
+    {
+        If (!$PSBoundParameters['XmlNode'])
+        {
+            return
+        }
+        $Properties = (Get-Member -InputObject $XmlNode -MemberType Property).Name
+        foreach ($Property in $Properties)
+        {
+            If ($XmlNode.$Property -is [XmlElement])
+            {
+                Set-CapitalizedXMLValues -XmlNode $XmlNode.$Property
+            }
+            elseif ($XmlNode.$Property -and $XmlNode.$Property -is [string])
+            {
+                $XmlNode.$Property = $XmlNode.$Property.Substring(0,1).ToUpper() + $XmlNode.$Property.Substring(1)
+            }
+        }
+        If ($PSBoundParameters['PassThru'])
+        {
+            return $XmlNode
+        }
+    }
+}
+
+#endregion helper functions
+
+#region Functions
+
+<#
+.Synopsis
+   Connect to a remote RES One Workspace cache
+.DESCRIPTION
+   Connect to the RES One Workspace cache on a remote Relay server or an agent.
+.EXAMPLE
+   Connect-RESWMCache -ComputerName RelaySvr001
+   Connecting to cache on Relay server RelaySvr001
+.EXAMPLE
+   Connect-RESWMCache -ComputerName WMAgent001 -Type Agent
+   Connecting to cache on agent WMAgent001
+#>
+function Connect-RESWMCache
+{
+    [CmdletBinding()]
+    [Alias('cwmc')]
+    [OutputType([IO.DirectoryInfo])]
+    Param
+    (
+        # Name of RES One Workspace Agent
+        [Parameter(ValueFromPipelineByPropertyName=$true,
+                   Position=0)]
+        [Alias('SamAccountName','Agent')]
+        $ComputerName = 'localhost',
+
+        # Type of cache you're connecting to
+        [ValidateSet('RelayServer','Agent')]
+        [string]
+        $Type = 'Agent',
+
+        # Name of the RES WM environment. Required if there are more than one.
+        [string]
+        $Environment,
+
+        # returns the path of the remote cache location
+        [switch]
+        $PassThru
+    )
+
+    Process
+    {
+        If (Test-Connection -ComputerName $ComputerName -Count 1 -Quiet)
+        {
+            If ($Type -eq 'RelayServer')
+            {
+                $Subkey = 'RelayServer'
+            }
+            Try
+            {
+                Switch ($ComputerName)
+                {
+                    localhost {$Registry = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine','Default')}
+                    Default   {$Registry = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey('LocalMachine', $ComputerName)}
+                }
+                
+                Write-Verbose 'Registrykey is available'
+                If (!($RESWMKey = $Registry.OpenSubKey("SOFTWARE\WOW6432Node\RES\Workspace Manager\$Subkey")))
+                {
+                    If (!($RESWMKey = $Registry.OpenSubKey("SOFTWARE\RES\Workspace Manager\$Subkey")))
+                    {
+                        Write-Error "RES ONE Workspace is not installed on computer [$ComputerName]" -Category NotInstalled -ErrorAction Stop
+                    }
+                }
+            }
+            catch
+            {
+                Write-Error "Unable to connect to registry" -Category ConnectionError -TargetObject $ComputerName -ErrorAction Stop
+            }
+            switch ($Type)
+            {
+                RelayServer {
+                    Write-Verbose "Attempting to retreive cache folder on Relay Server $ComputerName"
+                    If ($Environments = $RESWMKey.OpenSubKey('Environments'))
+                    {
+                        If ($Environments.GetSubKeyNames().count -eq 1)
+                        {
+                            $EnvironmentID = $Environments.GetSubKeyNames()
+                            $CacheLocation = $Environments.OpenSubKey("$EnvironmentID\Local").GetValue('CacheLocation').Replace(':','$')
+                            $global:RESWMCache = Get-ChildItem "\\$ComputerName\$CacheLocation\$EnvironmentID\Cache" | select -Last 1 | Get-Item
+                        }
+                        elseif ($PSBoundParameters['Environment'])
+                        {
+                            $Environments.GetSubKeyNames().ForEach({
+                                If ($Environments.OpenSubKey($_).GetValue('EnvironmentName') -eq $PSBoundParameters['Environment'])
+                                {
+                                    $CacheLocation = $Environments.OpenSubKey("$_\Local").GetValue('CacheLocation').Replace(':','$')
+                                    $global:RESWMCache = Get-ChildItem "\\$ComputerName\$CacheLocation\$EnvironmentID\Cache" | select -Last 1 | Get-Item
+                                    continue
+                                }
+                            })
+                        }
+                        else
+                        {
+                            $AllEnvironments = $Environments.GetSubKeyNames().ForEach({
+                                $Environments.OpenSubKey($_).GetValue('EnvironmentName')
+                            })
+                            Write-Error "Please specify which RES One Workspace environment to connect to: $($AllEnvironments -join ',')" -Category NotSpecified -ErrorAction Stop
+                        }
+                    }
+                    else
+                    {
+                        Write-Error "No RelayServer environments found" -Category ObjectNotFound -TargetObject $ComputerName -ErrorAction Stop
+                    }
+                }
+                Agent {
+                    Write-Verbose "Attempting to retreive cache folder on Agent $ComputerName"
+                    If ($Registry.GetValue('LocalCachePath'))
+                    {
+                        $global:RESWMCache = Get-Item "\\$ComputerName\$($RESWMKey.GetValue('LocalCachePath').Replace(':','$'))"
+                    }
+                    else
+                    {
+                        $global:RESWMCache = Get-Item "\\$ComputerName\$($RESWMKey.GetValue('InstallDir').Replace(':','$'))\Data\DBCache"
+                    }
+                }
+            }
+        }
+        else
+        {
+            Write-Error "Computer [$ComputerName] appears to be offline" -Category ConnectionError
+            return
+        }
+        If ($PSBoundParameters['PassThru'])
+        {
+            $global:RESWMCache
+        }
+    }
+}
+
+
+<#
+.Synopsis
+   Get RES One Workspace application
+.DESCRIPTION
+   Get RES One Workspace application.
+.EXAMPLE
+   Get-RESWMApplication -Title 'Internet Explorer'
+   Get RESWM Application with title 'Internet Explorer'
+.EXAMPLE
+   Get-RESWMApplication -Title Microsoft*
+   Get RESWM Applications where title starts with Microsoft
+.EXAMPLE
+   Get-RESWMApplication -AppID 102
+   Get RESWM Application with AppID 102
+.EXAMPLE
+   Get-RESWMApplication -Filter "enabled = 'yes'"
+   Get enabled RESWM Applications
+.EXAMPLE
+   Get-RESWMApplication -Filter "configuration/createmenushortcut = 'yes'"
+   Get RESWM Applications that have a shortcut in the start menu
+#>
+function Get-RESWMApplication
+{
+    [CmdletBinding(DefaultParameterSetName='Title')]
+    [Alias('gwma')]
+    [OutputType([RESWMApplication])]
+    Param
+    (
+        # Title of the application
+        [Parameter(ParameterSetName='Title',
+                   Position=0)]
+        [SupportsWildcards()]
+        [string]
+        $Title,
+
+        [Parameter(ParameterSetName='AppID',
+                   Position=0)]
+        [int]
+        $AppID,
+        
+        # GUID of the application
+        [Parameter(ValueFromPipelineByPropertyName=$true,
+                   ParameterSetName='ParentGUID',
+                   Position=0)]
+        [guid]
+        $ParentGUID,
+
+        # Xpath filter for the application based on the full object
+        [string]
+        $Filter
+    )
+
+    $Params = @{
+        Source = 'Objects\apps.xml'
+        Node = 'application'
+    }
+    If ($PSBoundParameters['Title'])
+    {
+        $Params.Add('Filter',"configuration/title = '$Title'")
+    }
+    elseif ($PSBoundParameters['AppID'])
+    {
+        $Params.Add('Filter',"appid = $AppID")
+    }
+    elseif ($PSBoundParameters['ParentGUID'])
+    {
+        $Params.Add('Filter',"guid = '{$ParentGUID}'")
+    }
+    elseif ($PSBoundParameters['Filter'])
+    {
+        $Params.Add('Filter',$Filter)
+    }
+    [RESWMApplication[]](Get-RESWMObject @Params) | where Title -notmatch '^([1-8]|-{3})$'
+}
+
+<#
+.Synopsis
+   Get RES One Workspace Security Role
+.DESCRIPTION
+   Get RES One Workspace Security Role
+.EXAMPLE
+   Get-RESWMSecurityRole
+   Get all security roles
+.EXAMPLE
+   Get-RESWMSecurityRole -Name HelpDesk
+   Get the security role named HelpDesk
+#>
+function Get-RESWMSecurityRole
+{
+    [CmdletBinding(DefaultParameterSetName='Name')]
+    [Alias('gwmsr')]
+    [OutputType([RESWMSecRole])]
+    Param
+    (
+        # Name of the security role
+        [Parameter(ParameterSetName='Name',
+                   Position=0)]
+        [SupportsWildcards()]
+        [string]
+        $Name,
+        
+        # GUID of the security role
+        [Parameter(ParameterSetName='GUID',
+                   Position=0)]
+        [guid]
+        $GUID
+    )
+
+    $Params = @{
+        Source = 'Objects\sec_role.xml'
+        Node = 'securityrole'
+    }
+    If ($PSBoundParameters['Name'])
+    {
+        $Params.Add('Filter',"objectdesc = '$Name'")
+    }
+    elseif ($PSBoundParameters['GUID'])
+    {
+        $Params.Add('Filter',"guid = '{$GUID}'")
+    }
+    [RESWMSecRole[]](Get-RESWMObject @Params)
+}
+
+<#
+.Synopsis
+   Get RES One Workspace drive mapping
+.DESCRIPTION
+   Get RES One Workspace drive mapping
+.EXAMPLE
+   Get-RESWMMapping
+   Get all drive mappings
+.EXAMPLE
+   Get-RESWMMapping -DriveLetter H
+   Get drive mapping for drive H:\
+#>
+function Get-RESWMMapping
+{
+    [CmdletBinding()]
+    [Alias('gwmm')]
+    [OutputType([RESWMMapping])]
+    Param
+    (
+        # Device drive letter
+        $DriveLetter
+    )
+
+    $Params = @{
+        Source = 'Objects\mappings.xml'
+        Node = 'mapping'
+    }
+    If ($PSBoundParameters['DriveLetter'])
+    {
+        $Params.Add('Filter',"device = '$DriveLetter`:'")
+    }
+    [RESWMMapping[]](Get-RESWMObject @Params)
+}
+
+<#
+.Synopsis
+   Get RES One Workspace registry
+.DESCRIPTION
+   Get RES One Workspace registry objects
+.EXAMPLE
+   Get-RESWMRegistry
+   Get all registry objects
+.EXAMPLE
+   Get-RESWMRegistry -Name iexplore*
+   Get registry objects where name starts with iexplore
+#>
+function Get-RESWMRegistry
+{
+    [CmdletBinding(DefaultParameterSetName='Name')]
+    [Alias('gwmr')]
+    [OutputType()]
+    Param
+    (
+        # Name of the security role
+        [Parameter(ParameterSetName='Name',
+                   Position=0)]
+        [SupportsWildcards()]
+        [string]
+        $Name,
+
+        [Parameter(ParameterSetName='GUID',
+                   Position=0)]
+        # GUID of the security role
+        [guid]
+        $GUID,
+
+        # GUID of the security role
+        [Parameter(ValueFromPipelineByPropertyName=$true,
+                   ParameterSetName='ParentGUID',
+                   Position=0)]
+        [guid]
+        $ParentGUID
+    )
+
+    process
+    {
+        $Params = @{
+            Source = 'Objects\pl_reg.xml'
+            Node = 'registry'
+        }
+        If ($PSBoundParameters['Name'])
+        {
+            $Params.Add('Filter',"name = '$Name'")
+        }
+        elseif ($PSBoundParameters['GUID'])
+        {
+            $Params.Add('Filter',"guid = '{$GUID}'")
+        }
+        elseif ($PSBoundParameters['ParentGUID'])
+        {
+            $Params.Add('Filter',"parentguid = '{$ParentGUID}'")
+        }
+        [RESWMRegistry[]](Get-RESWMObject @Params)
+    }
+}
+
+<#
+.Synopsis
+   Short description
+.DESCRIPTION
+   Long description
+.EXAMPLE
+   Example of how to use this cmdlet
+.EXAMPLE
+   Another example of how to use this cmdlet
+#>
+function Get-RESWMZone
+{
+    [CmdletBinding(DefaultParameterSetName='Name')]
+    [Alias('gwmz')]
+    [OutputType([RESWMZone])]
+    Param
+    (
+        # Name of the PowerZone
+        [Parameter(ParameterSetName='Name',
+                   Position=0)]
+        [SupportsWildcards()]
+        [string]
+        $Name,
+
+        # GUID of the PowerZone
+        [Parameter(ParameterSetName='GUID',
+                   Position=0)]
+        [guid]
+        $GUID,
+
+        # Application where the registry is located
+        [Parameter(ValueFromPipeline=$true,
+                   ParameterSetName='application',
+                   Position=0)]
+        [RESWMApplication]
+        $Application
+    )
+
+    $Params = @{
+        Source = 'Objects\pwrzone.xml'
+        Node = 'powerzone'
+    }
+    If ($PSBoundParameters['Name'])
+    {
+        $Params.Add('Filter',"Name = '$Name'")
+    }
+    elseif ($PSBoundParameters['GUID'])
+    {
+        $Params.Add('Filter',"guid = '{$GUID}'")
+    }
+    elseif ($PSBoundParameters['Application'])
+    {
+        $Params.Add('Filter',"parentguid = '{$($Application.GUID)}'")
+    }
+    [RESWMZone[]](Get-RESWMObject @Params)
+}
+
+<#
+.Synopsis
+   Short description
+.DESCRIPTION
+   Long description
+.EXAMPLE
+   Example of how to use this cmdlet
+.EXAMPLE
+   Another example of how to use this cmdlet
+#>
+function Get-RESWMUserPreference
+{
+    [CmdletBinding(DefaultParameterSetName='name')]
+    [Alias('gwmup')]
+    [OutputType([RESWMZone])]
+    Param
+    (
+        # Name of the user preference
+        [Parameter(ParameterSetName='name',
+                   Position=0)]
+        [string]
+        $Name,
+
+        # GUID of the user preference
+        [Parameter(ParameterSetName='guid',
+                   Position=0)]
+        [guid]
+        $GUID,
+
+        # Application where the user preference is located
+        [Parameter(ValueFromPipeline=$true,
+                   ParameterSetName='application',
+                   Position=0)]
+        [RESWMApplication]
+        $Application
+    )
+
+    $Params = @{
+        Source = 'Objects\user_prefs.xml'
+        Node = 'profile'
+    }
+    If ($PSBoundParameters['Name'])
+    {
+        $Params.Add('Filter',"Name = '$Name'")
+    }
+    elseif ($PSBoundParameters['GUID'])
+    {
+        $Params.Add('Filter',"guid = '{$GUID}'")
+    }
+    elseif ($PSBoundParameters['Application'])
+    {
+        $Params.Add('Filter',"parentguid = '{$($Application.GUID)}'")
+    }
+    [RESWMUserPref[]](Get-RESWMObject @Params)
+}
+
+#endregion Functions
