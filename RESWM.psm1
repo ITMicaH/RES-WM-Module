@@ -89,6 +89,10 @@ function Get-RESWMObject
             Write-Error 'Wildcards are only supported on the start and/or at end of the string' -Category InvalidArgument -ErrorAction Stop
         }
     }
+    else
+    {
+        $FullFilter = "[(not(system = 'yes'))]"
+    }
     If ($Node -eq 'application')
     {
         Select-Xml -Path $RESWMCache\$Source -XPath "//$Node$FullFilter" | select -ExpandProperty Node
@@ -134,6 +138,82 @@ function Set-CapitalizedXMLValues
         If ($PSBoundParameters['PassThru'])
         {
             return $XmlNode
+        }
+    }
+}
+
+# Convert content of a reg file to a registry object
+function Get-WMREGFile
+{
+    Param ($File)
+
+    $RegType = 'Policy'
+    switch -Regex -File $File
+    {
+        ';<PFNAME>(.+)</PFNAME>' {
+            $RegType = 'Registry'
+            $Description = $Matches[1]
+        }
+        ';<PFDESC>(.+)</PFDESC>' {
+            $RegType = 'Registry'
+            If ($Matches[1] -ne ' ')
+            {
+                $Description = $Matches[1]
+            }
+        }
+        '\[(?<Key>.+)\]' {
+            $Key = $Matches.Key
+        }
+        '"?(?<Name>[^"]+)"?=((?<Type>\w{3,}):)?"?(?<Data>[^"]+)"?' {
+            If ($Matches.Type)
+            {
+                switch ($Matches.Type)
+                {
+                    hex     {
+                                $Type = 'Binary'
+                                If ($Matches.Data -like '*,\')
+                                {
+                                    $Wait = $true
+                                    $Data = $Matches.Data.TrimEnd('\')
+                                }
+                                else
+                                {
+                                    $Data = [byte[]]$Matches.Data.Split(',').foreach({"0x$_"})}
+                            }
+                    dword   {$Type = 'DWORD';$Data = [int]"0x$($Matches.Data)"}
+                    Default {$Type = $Matches.Type;$Data = $Matches.Data}
+                }
+            }
+            else
+            {
+                $Type = 'String'
+                $Data = $Matches.Data -replace '\\\\','\'
+            }
+            If ($Matches.Name -eq '@')
+            {
+                $Name = '(Default)'
+            }
+            else
+            {
+                $Name = $Matches.Name
+            }
+            If (!$Wait -and $RegType -eq 'Registry')
+            {
+                [Registry]::new($Key,$Name,$Data,$Type,$Description)
+            }
+        }
+        '^;<PF>(.+)</PF>$' {
+            $Description = $Matches[1].split('\')[-1]
+            [Registry]::new($Key,$Name,$Data,$Type,$Description)
+        }
+        '^\s+(.{2},?)+'     {
+            $Data = $Data + $Matches[0].Trim().TrimEnd('\')
+            If ($Matches[0] -notlike '*,\')
+            {
+                $Data = [byte[]]$Data.Split(',').foreach({"0x$_"})
+                [Registry]::new($Key,$Name,$Data,$Type,$Description)
+                $Wait = $false
+            }
         }
     }
 }
@@ -256,6 +336,10 @@ function Connect-RESWMCache
                     {
                         $global:RESWMCache = Get-Item "\\$ComputerName\$($RESWMKey.GetValue('InstallDir').Replace(':','$'))\Data\DBCache"
                     }
+                    $global:AppMenus = @{}
+                    (Select-Xml $RESWMCache\Objects\app_menus.xml -XPath '//applicationmenu').Node.foreach({
+                        $AppMenus.Add($_.guid,$_.title)
+                    })
                 }
             }
         }
@@ -292,6 +376,9 @@ function Connect-RESWMCache
 .EXAMPLE
    Get-RESWMApplication -Filter "configuration/createmenushortcut = 'yes'"
    Get RESWM Applications that have a shortcut in the start menu
+.EXAMPLE
+   Get-RESWMStartMenu -Title 'Microsoft Office' | Get-RESWMApplication
+   Get RESWM Applications that are located in the start menu folder 'Microsoft Office'
 #>
 function Get-RESWMApplication
 {
@@ -319,6 +406,13 @@ function Get-RESWMApplication
         [guid]
         $ParentGUID,
 
+        # Start menu folder object
+        [Parameter(ValueFromPipeline=$true,
+                   ParameterSetName='MenuFolder',
+                   Position=0)]
+        [RESWMMenu]
+        $MenuFolder,
+
         # Xpath filter for the application based on the full object
         [string]
         $Filter
@@ -334,7 +428,7 @@ function Get-RESWMApplication
     }
     elseif ($PSBoundParameters['AppID'])
     {
-        $Params.Add('Filter',"appid = $AppID")
+        $Params.Add('Filter',"appid = '$AppID'")
     }
     elseif ($PSBoundParameters['ParentGUID'])
     {
@@ -344,7 +438,57 @@ function Get-RESWMApplication
     {
         $Params.Add('Filter',$Filter)
     }
-    [RESWMApplication[]](Get-RESWMObject @Params) | where Title -notmatch '^([1-8]|-{3})$'
+    elseif ($PSBoundParameters['MenuFolder'])
+    {
+        $Params.Add('Filter',"parentguid = '{$($MenuFolder.GUID)}'")
+    }
+    [RESWMApplication[]](Get-RESWMObject @Params)
+}
+
+<#
+.Synopsis
+   Get RES ONE Workspace startmenu folder
+.DESCRIPTION
+   Get RES ONE Workspace startmenu folder.
+.EXAMPLE
+   Get-RESWMStartMenu
+.EXAMPLE
+   Get-RESWMStartMenu -Title *office*
+#>
+function Get-RESWMStartMenu
+{
+    [CmdletBinding(DefaultParameterSetName='Name')]
+    [Alias('gwmsm')]
+    [OutputType([RESWMZone])]
+    Param
+    (
+        # Title of the menu folder
+        [Parameter(ParameterSetName='Name',
+                   Position=0)]
+        [SupportsWildcards()]
+        [string]
+        $Title,
+
+        # GUID of the menu folder
+        [Parameter(ParameterSetName='GUID',
+                   Position=0)]
+        [guid]
+        $GUID
+    )
+
+    $Params = @{
+        Source = 'Objects\app_menus.xml'
+        Node = 'applicationmenu'
+    }
+    If ($PSBoundParameters['Title'])
+    {
+        $Params.Add('Filter',"title = '$Title'")
+    }
+    elseif ($PSBoundParameters['GUID'])
+    {
+        $Params.Add('Filter',"guid = '{$GUID}'")
+    }
+    [RESWMMenu[]](Get-RESWMObject @Params)
 }
 
 <#
@@ -493,11 +637,11 @@ function Get-RESWMRegistry
 
 <#
 .Synopsis
-   Short description
+   Get RES ONE Workspace PowerZone
 .DESCRIPTION
-   Long description
+   Get RES ONE Workspace PowerZone (Locations and Devices)
 .EXAMPLE
-   Example of how to use this cmdlet
+   Get-RESWMZone
 .EXAMPLE
    Another example of how to use this cmdlet
 #>
@@ -519,14 +663,7 @@ function Get-RESWMZone
         [Parameter(ParameterSetName='GUID',
                    Position=0)]
         [guid]
-        $GUID,
-
-        # Application where the registry is located
-        [Parameter(ValueFromPipeline=$true,
-                   ParameterSetName='application',
-                   Position=0)]
-        [RESWMApplication]
-        $Application
+        $GUID
     )
 
     $Params = @{
@@ -540,10 +677,6 @@ function Get-RESWMZone
     elseif ($PSBoundParameters['GUID'])
     {
         $Params.Add('Filter',"guid = '{$GUID}'")
-    }
-    elseif ($PSBoundParameters['Application'])
-    {
-        $Params.Add('Filter',"parentguid = '{$($Application.GUID)}'")
     }
     [RESWMZone[]](Get-RESWMObject @Params)
 }
@@ -587,7 +720,7 @@ function Get-RESWMUserPreference
 
     $Params = @{
         Source = 'Objects\user_prefs.xml'
-        Node = 'profile'
+        Node = 'desktop_userpreferences/profile'
     }
     If ($PSBoundParameters['Name'])
     {
