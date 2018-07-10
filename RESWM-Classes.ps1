@@ -4,16 +4,18 @@ Using namespace  System.Xml
 
 class RESWMApplication
 {
-    [bool]       $Enabled
     [int]        $AppID
     [string]     $Title
     [string]     $Description
+    [string]     $Path
+    [bool]       $Enabled
     [string]     $CommandLine
     [string]     $Parameters
     [RESWMAccCtrl] $AccessControl
     [string]     $Type
     [XmlElement] $FullObject
     hidden [guid] $GUID
+    hidden [guid] $ParentGUID
 
     RESWMApplication ([string] $Title)
     {
@@ -55,17 +57,86 @@ class RESWMApplication
         }
         $this.FullObject = $XMLNode
         $this.GUID = $XMLNode.guid
+        If ($XMLNode.parentguid.count -gt 1)
+        {
+            $Parent = $XMLNode.ParentGUID | select -Unique | where {Get-RESWMStartMenu -GUID $_}
+            If ($Parent)
+            {
+                $this.ParentGUID = $Parent
+            }
+        }
+        else
+        {
+            $this.ParentGUID = $XMLNode.parentguid
+        }
+        $this.Path = Get-RESWMStartMenu -GUID $this.ParentGUID
+        If (!$this.Path)
+        {
+            $this.Path = 'Disabled!'
+        }
     }
 }
 
+# Menu folder
+class RESWMMenu
+{
+    [string] $Title
+    [string] $Description
+    [bool]   $Enabled
+    [string] $Path
+    hidden [guid] $GUID
+    hidden [guid] $ParentGUID
+    hidden [guid] $UpdateGUID
+
+    RESWMMenu ([XmlElement] $XMLNode)
+    {
+        foreach ($Property in [RESWMMenu].GetProperties().Name)
+        {
+            switch ($this.$Property)
+            {
+                yes     {$this.$Property = $true}
+                no      {$this.$Property = $false}
+                default {$this.$Property = $XMLNode.$Property}
+            }
+        }
+        If ($XMLNode.parentguid -eq '{00000000-0000-0000-0000-000000000000}')
+        {
+            $this.Path = 'Start'
+        }
+        else
+        {
+            $MenuNode = (Select-Xml -Path $global:RESWMCache\Objects\menutree.xml -XPath "//menu[@guid = '$($XMLNode.guid)']").Node
+            $arrPath = New-Object System.Collections.ArrayList
+            Do
+            {
+                $MenuNode = $MenuNode.ParentNode
+                If ($MenuNode.guid)
+                {
+                    $null = $arrPath.Add($global:AppMenus[($MenuNode.guid)])
+                }
+            }
+            Until (!$MenuNode.guid)
+            $null = $arrPath.Add('Start')
+            $arrPath.Reverse()
+            $this.Path = $arrPath -join '\'
+        }
+    }
+
+    [string] ToString ()
+    {
+        return $this.Path + '\' + $this.Title
+    }
+}
+
+# PowerZone
 class RESWMZone
 {
     [string] $Name
     [string] $Description
     [object] $Rules
-    [guid]   $Guid
     [bool]   $Enabled
     [string] $ObjectDesc
+    hidden [guid] $Guid
     hidden [guid] $UpdateGuid
 
     RESWMZone ([XmlElement] $XMLNode)
@@ -82,6 +153,7 @@ class RESWMZone
     }
 }
 
+# AD Organizational Unit
 class RESWMOU
 {
     [string] $Name
@@ -272,6 +344,7 @@ class RESWMUserPref
     [string] $Description
     [RESWMAccCtrl] $AccessControl
     [psobject] $Settings
+    [psobject] $Exclusions
     [guid]   $GUID
     [string] $Location
     hidden [guid]   $UpdateGuid
@@ -283,7 +356,7 @@ class RESWMUserPref
     {
         foreach ($Property in [RESWMUserPref].GetProperties().Name)
         {
-            switch ($this.$Property)
+            switch ($XMLNode.$Property)
             {
                 yes     {$this.$Property = $true}
                 no      {$this.$Property = $false}
@@ -295,6 +368,20 @@ class RESWMUserPref
             00000000-0000-0000-0000-000000000000 {$this.Location = 'Global'}
             default {$this.Location = 'Application'}
         }
+        If ($XMLNode.Mode -eq 'preserve_all')
+        {
+            $this.Settings = 'PreserveAll'
+        }
+    }
+
+    [string] ToString()
+    {
+        return $this.Name
+    }
+
+    [RESWMApplication] GetParentApplication ()
+    {
+        return (Get-RESWMApplication -ParentGUID $this.ParentGuid)
     }
 }
 
@@ -305,6 +392,7 @@ class RESWMRegistry
     [RESWMAccCtrl] $AccessControl
     [bool]         $Enabled
     [string]       $Type
+    [Registry[]]   $Registry
     [string]       $Location
     [string]       $State
     [string]       $ObjectDesc
@@ -319,7 +407,7 @@ class RESWMRegistry
     {
         foreach ($Property in [RESWMRegistry].GetProperties().Name)
         {
-            switch ($this.$Property)
+            switch ($XMLNode.$Property)
             {
                 yes     {$this.$Property = $true}
                 no      {$this.$Property = $false}
@@ -331,6 +419,25 @@ class RESWMRegistry
             00000000-0000-0000-0000-000000000000 {$this.Location = 'Global'}
             default {$this.Location = 'Application'}
         }
+        $this.Registry = Get-WMREGFile "$global:RESWMCache\Resources\pl_reg\{$($this.GUID)}.reg"
+    }
+}
+
+class Registry
+{
+    [string]   $Key
+    [string]   $Value
+    [psobject] $Data
+    [string]   $Type
+    [string]   $Description
+
+    Registry ([string]$Key,[string]$Value,[psobject]$Data,[string]$Type,[string]$Description)
+    {
+        $this.Key   = $Key
+        $this.Value = $Value
+        $this.Data  = $Data
+        $this.Type  = $Type
+        $this.Description = $Description
     }
 }
 
