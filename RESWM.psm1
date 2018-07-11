@@ -67,6 +67,7 @@ function Get-RESWMObject
     )
     
     Test-CacheConnection
+    [xml]$XML = (Get-Content $RESWMCache\$Source).Trim() # Trim counters empty (Description) node issue
     If ($PSBoundParameters['Filter'])
     {
         # Make filter case-insensitive Xpath 1.0 style
@@ -89,17 +90,18 @@ function Get-RESWMObject
             Write-Error 'Wildcards are only supported on the start and/or at end of the string' -Category InvalidArgument -ErrorAction Stop
         }
     }
-    else
+    elseif ($Node -ne 'securityrole')
     {
         $FullFilter = "[(not(system = 'yes'))]"
     }
     If ($Node -eq 'application')
     {
-        Select-Xml -Path $RESWMCache\$Source -XPath "//$Node$FullFilter" | select -ExpandProperty Node
+        #Select-Xml -Path $RESWMCache\$Source -XPath "//$Node$FullFilter" | select -ExpandProperty Node
+        Select-Xml -Xml $XML -XPath "/*/*$FullFilter" | select -ExpandProperty Node
     }
     else
     {
-        Select-Xml -Path $RESWMCache\$Source -XPath "//$Node$FullFilter" | select -ExpandProperty Node | Set-CapitalizedXMLValues -PassThru
+        Select-Xml -Xml $XML -XPath "/*/*$FullFilter" | select -ExpandProperty Node | Set-CapitalizedXMLValues -PassThru
     }
 }
 
@@ -164,24 +166,57 @@ function Get-WMREGFile
         '\[(?<Key>.+)\]' {
             $Key = $Matches.Key
         }
-        '"?(?<Name>[^"]+)"?=((?<Type>\w{3,}):)?"?(?<Data>[^"]+)"?' {
+        '"?(?<Name>[^"]+)"?=((?<Type>.{3,}):)?"?(?<Data>[^"]+)"?' {
             If ($Matches.Type)
             {
                 switch ($Matches.Type)
                 {
                     hex     {
-                                $Type = 'Binary'
-                                If ($Matches.Data -like '*,\')
-                                {
-                                    $Wait = $true
-                                    $Data = $Matches.Data.TrimEnd('\')
-                                }
-                                else
-                                {
-                                    $Data = [byte[]]$Matches.Data.Split(',').foreach({"0x$_"})}
-                            }
-                    dword   {$Type = 'DWORD';$Data = [int]"0x$($Matches.Data)"}
-                    Default {$Type = $Matches.Type;$Data = $Matches.Data}
+                        $Type = 'Binary'
+                        If ($Matches.Data -like '*,\')
+                        {
+                            $Wait = $true
+                            $Data = $Matches.Data.TrimEnd('\')
+                        }
+                        else
+                        {
+                            $Data = [byte[]]$Matches.Data.Split(',').foreach({"0x$_"})
+                        }
+                    }
+                    'hex(2)' {
+                        $Type = 'ExpandString'
+                        If ($Matches.Data -like '*,\')
+                        {
+                            $Wait = $true
+                            $Data = $Matches.Data.TrimEnd('\')
+                        }
+                        else
+                        {
+                            $Data = [byte[]]$Matches.Data.Split(',').foreach({"0x$_"})
+                            $Data = [System.Text.Encoding]::Unicode.GetString($Data) -replace '\\\\','\'
+                        }
+                    }
+                    'hex(7)' {
+                        $Type = 'MultiString'
+                        If ($Matches.Data -like '*,\')
+                        {
+                            $Wait = $true
+                            $Data = $Matches.Data.TrimEnd('\')
+                        }
+                        else
+                        {
+                            $Data = [byte[]]$Matches.Data.Split(',').foreach({"0x$_"})
+                            $Data = [System.Text.Encoding]::Unicode.GetString($Data) -replace '\\\\','\'
+                        }
+                    }
+                    dword   {
+                        $Type = 'DWORD'
+                        $Data = [int]"0x$($Matches.Data)"
+                    }
+                    Default {
+                        $Type = $Matches.Type
+                        $Data = $Matches.Data
+                    }
                 }
             }
             else
@@ -206,11 +241,15 @@ function Get-WMREGFile
             $Description = $Matches[1].split('\')[-1]
             [Registry]::new($Key,$Name,$Data,$Type,$Description)
         }
-        '^\s+(.{2},?)+'     {
+        '^\s+(.{2},?)+\\?'     {
             $Data = $Data + $Matches[0].Trim().TrimEnd('\')
             If ($Matches[0] -notlike '*,\')
             {
                 $Data = [byte[]]$Data.Split(',').foreach({"0x$_"})
+                If ($Type -ne 'Binary')
+                {
+                    $Data = [System.Text.Encoding]::Unicode.GetString($Data) -replace '\\\\','\'
+                }
                 [Registry]::new($Key,$Name,$Data,$Type,$Description)
                 $Wait = $false
             }
@@ -735,6 +774,194 @@ function Get-RESWMUserPreference
         $Params.Add('Filter',"parentguid = '{$($Application.GUID)}'")
     }
     [RESWMUserPref[]](Get-RESWMObject @Params)
+}
+
+<#
+.Synopsis
+   Get RES ONE Workspace printer
+.DESCRIPTION
+   Get RES ONE Workspace printer
+.EXAMPLE
+   Get-RESWMPrinter -Printer *\PRT-001
+   Get RES WM printer named PRT-001
+.EXAMPLE
+   Get-RESWMPrinter -Printer \\SRV-PRT-001\*
+   Get RES WM printers on printserver SRV-PRT-001
+.EXAMPLE
+   Get-RESWMPrinter -Driver Lexmark*
+   Get RES WM printer with a Lexmark driver
+#>
+function Get-RESWMPrinter
+{
+    [CmdletBinding(DefaultParameterSetName='Name')]
+    [Alias('gwmp')]
+    [OutputType([RESWMPrinter])]
+    Param
+    (
+        # Path and name of the printer
+        [Parameter(ParameterSetName='Name',
+                   Position=0)]
+        [SupportsWildcards()]
+        [string]
+        $Printer,
+
+        # GUID of the PowerZone
+        [Parameter(ParameterSetName='GUID',
+                   Position=0)]
+        [guid]
+        $GUID,
+
+        [Parameter(ParameterSetName='Driver',
+                   Position=0)]
+        [SupportsWildcards()]
+        [string]
+        $Driver
+    )
+
+    $Params = @{
+        Source = 'Objects\pl_prn.xml'
+        Node = 'printermapping'
+    }
+    If ($PSBoundParameters['Name'])
+    {
+        $Params.Add('Filter',"printer = '$Name'")
+    }
+    elseif ($PSBoundParameters['GUID'])
+    {
+        $Params.Add('Filter',"guid = '{$GUID}'")
+    }
+    elseif ($PSBoundParameters['Driver'])
+    {
+        $Params.Add('Filter',"driver = '$Driver'")
+    }
+    [RESWMPrinter[]](Get-RESWMObject @Params)
+}
+
+<#
+.Synopsis
+   Update Ivanti Workspace Control agent on (remote) computer
+.DESCRIPTION
+   Update Ivanti Workspace Control agent on (remote) computer
+.EXAMPLE
+   Update-RESWMAgentCache -ComputerName PC001
+.EXAMPLE
+   Get-BrokerMachine -SummaryState Available | Update-RESWMAgentCache | ogv -Title 'Updating Workspace Cache for available desktops'
+#>
+function Update-RESWMAgentCache
+{
+    [CmdletBinding()]
+    [OutputType([psobject[]])]
+    [Alias('uwmac')]
+    Param
+    (
+        # Name of remote computer
+        [Parameter(ValueFromPipelineByPropertyName=$true,
+                   Position=0)]
+        [Alias('HostedMachineName','DeviceName','Name','PSComputerName')]
+        [string]
+        $ComputerName = $RESWMCache.FullName.Split('\')[2]
+    )
+    Begin
+    {
+        $i = 1
+        $ActiveJobIDs = Get-Job | select -ExpandProperty Id
+    }
+    Process
+    {
+        $null = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            $WMService = 'RES'
+            switch ($env:PROCESSOR_ARCHITECTURE) {
+                x86   {$RegPath = "HKLM:\SOFTWARE\RES\Workspace Manager"}
+                AMD64 {$RegPath = "HKLM:\SOFTWARE\WOW6432Node\RES\Workspace Manager"}
+            }
+            $null = Test-Path $RegPath -ErrorAction Stop
+            $Start = Get-Date
+            $GlobalGUID = Get-ItemProperty -Path $RegPath\UpdateGUIDs -Name Global
+            If ($GlobalGUID.Global)
+            {
+                Set-ItemProperty -Path $RegPath\UpdateGUIDs -Name Global -Value $null
+            }
+            Restart-Service $WMService
+            Do
+            {
+                $GlobalGUID = Get-ItemProperty -Path $RegPath\UpdateGUIDs -Name Global
+                If ($GlobalGUID.Global)
+                {
+                    $Time = (Get-Date) - $Start
+                    $Output = [pscustomobject]@{
+                        Success = $true
+                        Time = $Time
+                    }
+                    return $Output
+                }
+                else
+                {
+                    $Time = (Get-Date) - $Start
+                    sleep -Seconds 1
+                }
+            }
+            Until ($Time.Minutes -eq 5)
+            $Output = [pscustomobject]@{
+                Success = $false
+                Time = $Time
+            }
+            return $Output
+        } -AsJob
+    }
+    End
+    {
+        $Jobs = Get-Job | Where Id -NotIn $ActiveJobIDs
+        $Jobs | Receive-Job -Wait -AutoRemoveJob | select PSComputerName,Success,Time
+    }
+}
+
+<#
+.Synopsis
+   Short description
+.DESCRIPTION
+   Long description
+.EXAMPLE
+   Example of how to use this cmdlet
+.EXAMPLE
+   Another example of how to use this cmdlet
+#>
+function Reset-RESWMApplicationPreference
+{
+    [CmdletBinding(SupportsShouldProcess=$true)]
+    [Alias('rwmap')]
+    Param
+    (
+        # RES ONE Workspace application
+        [Parameter(Mandatory=$true,
+                   ValueFromPipeline=$true,
+                   Position=0)]
+        [RESWMApplication]
+        $Application,
+
+        # User for whom the cache will be reset
+        [Parameter(Mandatory=$true,
+                   Position=1)]
+        [RESWMUser]
+        $User,
+
+        # Path to the users RES profiles
+        [Parameter(Mandatory=$false,
+                   Position=2)]
+        [string]
+        $ProfilePath = 'U:\pwrmenu'
+    )
+
+    $Drive = Get-RESWMMapping -DriveLetter $ProfilePath.Substring(0,1) | where {
+        (Compare-Object $_.Accesscontrol.Access.Object $User.MemberOf -IncludeEqual | where SideIndicator -eq '==') -or
+        ($_.Accesscontrol.Access.Object -contains "$Domain\$UserName")
+    }
+    $Root = $Drive.ShareName -replace '%USERNAME%',$UserName
+    $UserPref = "$Root\$(Split-Path $ProfilePath -Leaf)\UserPref"
+    If (!(Test-Path $UserPref\Backup))
+    {
+        $Backup = New-Item -Path $UserPref -Name Backup -ItemType Directory
+    }
+    Get-Item $UserPref\$ProfileGUID* | Move-Item -Destination $UserPref\Backup\ -Force
 }
 
 #endregion Functions
