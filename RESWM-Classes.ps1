@@ -2,6 +2,7 @@
 
 Using namespace  System.Xml
 
+# Application
 class RESWMApplication
 {
     [int]        $AppID
@@ -177,6 +178,53 @@ class RESWMOU
     }
 }
 
+# AD user
+class RESWMUser
+{
+    [string] $Name
+    [string] $DistinghuishedName
+    [string[]] $MemberOf
+
+    RESWMUser ([string] $User)
+    {
+        $UserName = $User.Split('\')[1]
+        $Domain = $User.Split('\')[0]
+        $forest = [System.DirectoryServices.ActiveDirectory.Forest]::GetCurrentForest()
+        $ADDomain = $forest.Domains | where Name -Like "$Domain.*"
+        $ADSearcher = [adsisearcher]::new($ADDomain.GetDirectoryEntry(),"(&(objectClass=user)(SamAccountName=$UserName))")
+        $ADSearcher.PropertiesToLoad.AddRange(@('name','distinguishedname','objectClass','memberof'))
+        $User = $ADSearcher.FindAll()
+        $this.Name = $User.Properties.name[0]
+        $this.DistinghuishedName = $User.Properties.distinguishedname[0]
+        $this.MemberOf = $User.Properties.memberof.TrimStart('CN=').foreach({
+            $GroupName = $_.Split(',')[0]
+            $DomainName = $_.Split(',').where({$_ -like 'DC=*'})[0].TrimStart('DC=')
+            "$DomainName\$GroupName"
+        })
+    }
+
+    RESWMUser ([string] $UserName, [string] $Domain)
+    {
+        $forest = [System.DirectoryServices.ActiveDirectory.Forest]::GetCurrentForest()
+        $ADDomain = $forest.Domains | where Name -Like "$Domain.*"
+        $ADSearcher = [adsisearcher]::new($ADDomain.GetDirectoryEntry(),"(&(objectClass=user)(SamAccountName=$UserName))")
+        $ADSearcher.PropertiesToLoad.AddRange(@('name','distinguishedname','objectClass','memberof'))
+        $User = $ADSearcher.FindAll()
+        $this.Name = $User.Properties.name[0]
+        $this.DistinghuishedName = $User.Properties.distinguishedname[0]
+        $this.MemberOf = $User.Properties.memberof.TrimStart('CN=').foreach({
+            $GroupName = $_.Split(',')[0]
+            $DomainName = $_.Split(',').where({$_ -like 'DC=*'})[0].TrimStart('DC=')
+            "$DomainName\$GroupName"
+        })
+    }
+
+    [string] ToString()
+    {
+        return $this.Name
+    }
+}
+
 class RESWMAccCtrl
 {
     [string] $AccessMode
@@ -191,7 +239,8 @@ class RESWMAccCtrl
         {
             all       {$this.Access = 'Everyone'}
             group     {$this.Access = $XMLNode.grouplist.group}
-            secrole   {}
+            secrole   {$this.Access = $XMLNode.secroles.secrole.foreach({
+                            Get-RESWMSecurityRole -GUID $_})}
             delegated {$this.Access = @($XMLNode.appmanlist.appmanglobal).foreach({
                             [RESWMAccess]::new($_,'Delegated')})}
             ou        {$this.Access = $XMLNode.oufingerprint.ou}
@@ -285,7 +334,6 @@ class RESWMSecRole
     hidden [GUID] $Guid
     hidden [GUID] $UpdateGuid
     [bool] $Enabled
-    [bool] $System
 
     RESWMSecRole ([XmlElement] $XMLNode)
     {
@@ -305,7 +353,7 @@ class RESWMMapping
 {
     [string] $Device
     [string] $Description
-    [string] $Path
+    [string] $ShareName
     [string] $FriendlyName
     [RESWMAccCtrl] $Accesscontrol
     [bool]   $Enabled
@@ -335,6 +383,10 @@ class RESWMMapping
         }
     }
 
+    [string] ToString()
+    {
+        return $this.ShareName
+    }
 }
 
 class RESWMUserPref
@@ -438,6 +490,53 @@ class Registry
         $this.Data  = $Data
         $this.Type  = $Type
         $this.Description = $Description
+    }
+
+    [string] ToString ()
+    {
+        return $this.Value
+    }
+}
+
+# Printer
+class RESWMPrinter
+{
+    [string] $Printer
+    [string] $BackupPrinter
+    [bool]   $Default
+    [RESWMAccCtrl] $AccessControl
+    [string] $Comment
+    [string] $Description
+    [string] $Driver
+    [bool]   $Enabled
+    [bool]   $Failover
+    [bool]   $FastConnect
+    [string] $Location    
+    [int]    $Order    
+    [string] $PrinterPreference
+    [string] $State
+    [bool]   $WaitForTask
+    hidden [guid] $GUID
+    hidden [guid] $ParentGUID
+    hidden [guid] $UpdateGUID
+    #$objectdesc
+
+    RESWMPrinter ([XmlElement] $XMLNode)
+    {
+        foreach ($Property in [RESWMPrinter].GetProperties().Name)
+        {
+            switch ($XMLNode.$Property)
+            {
+                yes     {$this.$Property = $true}
+                no      {$this.$Property = $false}
+                default {$this.$Property = $XMLNode.$Property}
+            }
+        }
+    }
+
+    [string] ToString ()
+    {
+        return $this.Printer
     }
 }
 
