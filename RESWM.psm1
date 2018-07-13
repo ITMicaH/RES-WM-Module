@@ -12,9 +12,9 @@ function Test-CacheConnection
 {
     [CmdletBinding()]
     Param()
-    If ($RESWMCache)
+    If ($Drive = Get-PSDrive WMCache)
     {
-        $Computer = $RESWMCache.FullName.Split('\')[2]
+        $Computer = $Drive.Root.Split('\')[2]
         If ($Computer -ne 'localhost')
         {
             foreach ($Time in (1..4))
@@ -67,7 +67,7 @@ function Get-RESWMObject
     )
     
     Test-CacheConnection
-    [xml]$XML = (Get-Content $RESWMCache\$Source).Trim() # Trim counters empty (Description) node issue
+    [xml]$XML = (Get-Content WMCache:\$Source).Trim() # Trim counters empty (Description) node issue
     If ($PSBoundParameters['Filter'])
     {
         # Make filter case-insensitive Xpath 1.0 style
@@ -277,31 +277,38 @@ function Connect-RESWMCache
 {
     [CmdletBinding()]
     [Alias('cwmc')]
-    [OutputType([IO.DirectoryInfo])]
+    [OutputType()]
     Param
     (
         # Name of RES One Workspace Agent
         [Parameter(ValueFromPipelineByPropertyName=$true,
                    Position=0)]
         [Alias('SamAccountName','Agent')]
+        [string]
         $ComputerName = 'localhost',
 
-        # Type of cache you're connecting to
+        # Type of cache you're connecting to.
         [ValidateSet('RelayServer','Agent')]
         [string]
         $Type = 'Agent',
+
+        # Credential to connect to remote agent.
+        [PSCredential]
+        [System.Management.Automation.CredentialAttribute()]
+        $Credential,
 
         # Name of the RES WM environment. Required if there are more than one.
         [string]
         $Environment,
 
-        # returns the path of the remote cache location
+        # returns the path of the remote cache location.
         [switch]
         $PassThru
     )
 
     Process
     {
+        $ComputerName = [System.Net.Dns]::GetHostByName($ComputerName).HostName # FQDN
         If (Test-Connection -ComputerName $ComputerName -Count 1 -Quiet)
         {
             If ($Type -eq 'RelayServer')
@@ -331,7 +338,7 @@ function Connect-RESWMCache
             }
             switch ($Type)
             {
-                RelayServer {
+                <#RelayServer {
                     Write-Verbose "Attempting to retreive cache folder on Relay Server $ComputerName"
                     If ($Environments = $RESWMKey.OpenSubKey('Environments'))
                     {
@@ -364,19 +371,27 @@ function Connect-RESWMCache
                     {
                         Write-Error "No RelayServer environments found" -Category ObjectNotFound -TargetObject $ComputerName -ErrorAction Stop
                     }
-                }
+                }#>
                 Agent {
                     Write-Verbose "Attempting to retreive cache folder on Agent $ComputerName"
+                    $WMCache = @{
+                        Name = 'WMCache'
+                        PSProvider = 'FileSystem'
+                        Root = "\\$ComputerName\$($RESWMKey.GetValue('InstallDir').Replace(':','$'))Data\DBCache"
+                    }
                     If ($Registry.GetValue('LocalCachePath'))
                     {
-                        $global:RESWMCache = Get-Item "\\$ComputerName\$($RESWMKey.GetValue('LocalCachePath').Replace(':','$'))"
+                        $WMCache.Root = "\\$ComputerName\$($RESWMKey.GetValue('LocalCachePath').Replace(':','$'))"
                     }
-                    else
+                    If ($PSBoundParameters['Credential'])
                     {
-                        $global:RESWMCache = Get-Item "\\$ComputerName\$($RESWMKey.GetValue('InstallDir').Replace(':','$'))\Data\DBCache"
+                        $WMCache.Add('Credential',$Credential)
                     }
+                    Get-PSDrive -Name WMCache  -ErrorAction SilentlyContinue | Remove-PSDrive
+                    $RESDrive = New-PSDrive @WMCache -Scope global -ErrorAction Stop
+                    #[RESWMConnection]$global:RESWMCache = $WMCache
                     $global:AppMenus = @{}
-                    (Select-Xml $RESWMCache\Objects\app_menus.xml -XPath '//applicationmenu').Node.foreach({
+                    (Select-Xml WMCache:\Objects\app_menus.xml -XPath '//applicationmenu').Node.foreach({
                         $AppMenus.Add($_.guid,$_.title)
                     })
                 }
@@ -389,7 +404,7 @@ function Connect-RESWMCache
         }
         If ($PSBoundParameters['PassThru'])
         {
-            $global:RESWMCache
+            Return $RESDrive
         }
     }
 }
@@ -734,7 +749,7 @@ function Get-RESWMUserPreference
 {
     [CmdletBinding(DefaultParameterSetName='name')]
     [Alias('gwmup')]
-    [OutputType([RESWMZone])]
+    [OutputType([RESWMUserPref])]
     Param
     (
         # Name of the user preference
@@ -859,7 +874,7 @@ function Update-RESWMAgentCache
                    Position=0)]
         [Alias('HostedMachineName','DeviceName','Name','PSComputerName')]
         [string]
-        $ComputerName = $RESWMCache.FullName.Split('\')[2]
+        $ComputerName = (Get-PSDrive WMCache).root.Split('\')[2]
     )
     Begin
     {
@@ -925,18 +940,18 @@ function Update-RESWMAgentCache
 .EXAMPLE
    Another example of how to use this cmdlet
 #>
-function Reset-RESWMApplicationPreference
+function Reset-RESWMUserPreference
 {
     [CmdletBinding(SupportsShouldProcess=$true)]
-    [Alias('rwmap')]
+    [Alias('rwmup')]
     Param
     (
         # RES ONE Workspace application
         [Parameter(Mandatory=$true,
                    ValueFromPipeline=$true,
                    Position=0)]
-        [RESWMApplication]
-        $Application,
+        [RESWMUserPref]
+        $UserPreference,
 
         # User for whom the cache will be reset
         [Parameter(Mandatory=$true,
@@ -948,20 +963,72 @@ function Reset-RESWMApplicationPreference
         [Parameter(Mandatory=$false,
                    Position=2)]
         [string]
-        $ProfilePath = 'U:\pwrmenu'
+        $ZeroProfilePath = 'U:\pwrmenu',
+
+        # Show profile files in backup folder
+        [switch]
+        $PassThru
     )
 
-    $Drive = Get-RESWMMapping -DriveLetter $ProfilePath.Substring(0,1) | where {
-        (Compare-Object $_.Accesscontrol.Access.Object $User.MemberOf -IncludeEqual | where SideIndicator -eq '==') -or
-        ($_.Accesscontrol.Access.Object -contains "$Domain\$UserName")
-    }
-    $Root = $Drive.ShareName -replace '%USERNAME%',$UserName
-    $UserPref = "$Root\$(Split-Path $ProfilePath -Leaf)\UserPref"
-    If (!(Test-Path $UserPref\Backup))
+    Begin
     {
-        $Backup = New-Item -Path $UserPref -Name Backup -ItemType Directory
+        Write-Verbose 'Determining path to users user preferences...'
+        $Drive = Get-RESWMMapping -DriveLetter $ZeroProfilePath.Substring(0,1) | where {
+            (Compare-Object $_.Accesscontrol.Access.Object $User.MemberOf -IncludeEqual | where SideIndicator -eq '==') -or
+            ($_.Accesscontrol.Access.Object -contains "$User")
+        }
+        $ShareName = $Drive.ShareName.replace('%USERNAME%',$User.Name)
+        $Root = "$ShareName\$(Split-Path $ZeroProfilePath -Leaf)"
+        If ((Get-PSDrive WMCache).Credential.UserName)
+        {
+            $Credential = (Get-PSDrive WMCache).Credential
+        }
+        
+        $UserPref = Get-Item $Root\UserPref -ErrorAction Stop
+        If (!(Test-Path $UserPref\Backup))
+        {
+            $Backup = New-Item -Path $UserPref -Name Backup -ItemType Directory -ErrorAction Stop
+        }
+        $MovedFiles = New-Object System.Collections.ArrayList
     }
-    Get-Item $UserPref\$ProfileGUID* | Move-Item -Destination $UserPref\Backup\ -Force
+    Process
+    {
+        If ($Files = Get-Item "$UserPref\{$($UserPreference.GUID)}.*")
+        {
+            Foreach ($File in $Files)
+            {
+                if ($pscmdlet.ShouldProcess($File, "Move to Backup folder"))
+                {
+                    If ($Credential)
+                    {
+                        Write-Verbose "Running move command under account [$($Credential.UserName)]"
+                        Start-Process powershell.exe -ArgumentList "-Command `"Move-Item -Path '$($File.FullName)' -Destination '$UserPref\Backup\' -Force`"" -WindowStyle Hidden -Credential $Credential
+                    }
+                    else
+                    {
+                        Write-Verbose "Moving file [$($File.Name)] to backup folder."
+                        Move-Item -Path $File.FullName -Destination $UserPref\Backup\ -Force
+                    }
+                    $null = $MovedFiles.Add($File.Name)
+                }
+            }
+        }
+        else
+        {
+            Write-Error "No user preferences found for this user." -Category ObjectNotFound
+        }
+    }
+    End
+    {
+        If ($PSBoundParameters['PassThru'] -and $MovedFiles.Count)
+        {
+            while ($MovedFiles.ForEach({Test-Path $UserPref\Backup\$_}) -contains $false)
+            {
+                sleep -Milliseconds 500
+            }
+            $MovedFiles.ForEach({Get-Item $UserPref\Backup\$_})
+        }
+    }
 }
 
 #endregion Functions
