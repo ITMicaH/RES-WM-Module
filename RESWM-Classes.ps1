@@ -183,20 +183,22 @@ class RESWMUser
 {
     [string] $Name
     [string] $DistinghuishedName
+    [string] $Domain
     [string[]] $MemberOf
 
     RESWMUser ([string] $User)
     {
         $UserName = $User.Split('\')[1]
-        $Domain = $User.Split('\')[0]
+        $DomainName = $User.Split('\')[0]
         $forest = [System.DirectoryServices.ActiveDirectory.Forest]::GetCurrentForest()
-        $ADDomain = $forest.Domains | where Name -Like "$Domain.*"
+        $ADDomain = $forest.Domains | where Name -Like "$DomainName.*"
         $ADSearcher = [adsisearcher]::new($ADDomain.GetDirectoryEntry(),"(&(objectClass=user)(SamAccountName=$UserName))")
         $ADSearcher.PropertiesToLoad.AddRange(@('name','distinguishedname','objectClass','memberof'))
-        $User = $ADSearcher.FindAll()
-        $this.Name = $User.Properties.name[0]
-        $this.DistinghuishedName = $User.Properties.distinguishedname[0]
-        $this.MemberOf = $User.Properties.memberof.TrimStart('CN=').foreach({
+        $Account = $ADSearcher.FindAll()
+        $this.Name = $Account.Properties.name[0]
+        $this.DistinghuishedName = $Account.Properties.distinguishedname[0]
+        $this.Domain = $DomainName
+        $this.MemberOf = $Account.Properties.memberof.TrimStart('CN=').foreach({
             $GroupName = $_.Split(',')[0]
             $DomainName = $_.Split(',').where({$_ -like 'DC=*'})[0].TrimStart('DC=')
             "$DomainName\$GroupName"
@@ -212,6 +214,7 @@ class RESWMUser
         $User = $ADSearcher.FindAll()
         $this.Name = $User.Properties.name[0]
         $this.DistinghuishedName = $User.Properties.distinguishedname[0]
+        $this.Domain = $Domain
         $this.MemberOf = $User.Properties.memberof.TrimStart('CN=').foreach({
             $GroupName = $_.Split(',')[0]
             $DomainName = $_.Split(',').where({$_ -like 'DC=*'})[0].TrimStart('DC=')
@@ -221,7 +224,7 @@ class RESWMUser
 
     [string] ToString()
     {
-        return $this.Name
+        return $this.Domain + '\' + $this.Name
     }
 }
 
