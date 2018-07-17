@@ -28,7 +28,14 @@ function Test-CacheConnection
                     sleep -Milliseconds 3
                 }
             }
-            Write-Error -Message "Connection to cache on $Computer is lost." -Category ConnectionError -TargetObject $Computer -RecommendedAction "Connect to a differrent computer." -ErrorAction Stop
+            $Params = @{
+                Message = "Connection to cache on $Computer is lost."
+                Category = 'ConnectionError'
+                TargetObject = $Computer
+                RecommendedAction = "Connect to a differrent computer."
+                ErrorAction = 'Stop'
+            }
+            Write-Error @Params
         }
     }
     else
@@ -63,31 +70,73 @@ function Get-RESWMObject
 
         # Filter using Xpath
         [string]
-        $Filter
+        $Filter,
+
+        # Filter on user
+        [RESWMUser]
+        $User
     )
     
     Test-CacheConnection
     [xml]$XML = (Get-Content WMCache:\$Source).Trim() # Trim counters empty (Description) node issue
+    $FullFilter = ''
     If ($PSBoundParameters['Filter'])
     {
-        # Make filter case-insensitive Xpath 1.0 style
-        $Property = "translate($($Filter.Split('=').Trim()[0]),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')"
-        $Value = $Filter.Split('=').Trim()[1].ToLower()
-
-        If ($Value -match "^'(\*)?([^\*]+)(\*)?'$")
+        $Filters = $Filter -split '\b(and|or)'
+        $FullFilterArray = New-Object System.Collections.ArrayList
+        Foreach ($Filter in $Filters)
         {
-            # Convert wildcards to Xpath 1.0 queries
-            switch (($Matches.Keys | measure -Sum).Sum)
+            # Make filter case-insensitive Xpath 1.0 style
+            if ($Filter -match '^(and|or)$')
             {
-                2 {$FullFilter = "[$Property = $Value]"}
-                3 {$FullFilter = "[('$($Matches[2])' = substring($Property,string-length($($Filter.Split('=').Trim()[0]))-string-length('$($Matches[2])')+1))]"}
-                5 {$FullFilter = "[(starts-with($Property,'$($Matches[2])'))]"}
-                6 {$FullFilter = "[contains($Property,'$($Matches[2])')]"}
+                $null = $FullFilterArray.Add($Filter)
+            }
+            else
+            {
+                $Property = "translate($($Filter.Split('=').Trim()[0]),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')"
+                $Value = $Filter.Split('=').Trim()[1].ToLower()              
+
+                If ($Value -match "^'(\*)?([^\*]+)(\*)?'$")
+                {
+                    # Convert wildcards to Xpath 1.0 queries
+                    switch (($Matches.Keys | measure -Sum).Sum)
+                    {
+                        2 {$null = $FullFilterArray.Add("$Property=$Value")}
+                        3 {$null = $FullFilterArray.Add("('$($Matches[2])'=substring($Property,string-length($($Filter.Split('=').Trim()[0]))-string-length('$($Matches[2])')+1))")}
+                        5 {$null = $FullFilterArray.Add("(starts-with($Property,'$($Matches[2])'))")}
+                        6 {$null = $FullFilterArray.Add("(contains($Property,'$($Matches[2])'))")}
+                    }
+                }
+                elseif ($Value -match '\*')
+                {
+                    Write-Error 'Wildcards are only supported on the start and/or at end of the string' -Category InvalidArgument -ErrorAction Stop
+                }
+                else
+                {
+                    $FullFilterArray = $Filter
+                }
             }
         }
-        else
+        $FullFilter = "[$($FullFilterArray -join ' ')]"
+    }
+    elseif ($PSBoundParameters['User'])
+    {
+        switch ($Node)
         {
-            Write-Error 'Wildcards are only supported on the start and/or at end of the string' -Category InvalidArgument -ErrorAction Stop
+            application  {
+                $GroupCheck = $User.MemberOf.ForEach({"*/grouplist/group='$_'"}) -join ' or '
+                $NotGroupCheck = '(not(' + ($User.MemberOf.ForEach({"*/notgrouplist/group='$_'"}) -join ' or ') + '))'
+                $UserCheck = "*/grouplist/group='$User'"
+                $NotUserCheck = "(not(*/notgrouplist/group='$User'))"
+                $Everyone = "*/accesstype='all'"
+                $FullFilter = "[(*/*/ou = '$($User.ParentOU)' or $Everyone or $UserCheck or $GroupCheck) and ($NotGroupCheck or $NotUserCheck) and (not(system = 'yes'))]"
+            }
+            Default      {
+                $GroupCheck = $User.MemberOf.ForEach({"(*/access[object='$_' and (not(options='notingroup'))])"}) -join ' or '
+                $UserCheck = "(*/access[object='$User' and (not(options='notuser'))])"
+                $Everyone = "*/access/type='global'"
+                $FullFilter = "[(*/*/ou = '$($User.ParentOU)' or $Everyone or $UserCheck or $GroupCheck) and (not(system = 'yes'))]"
+            }
         }
     }
     elseif ($Node -ne 'securityrole')
@@ -96,7 +145,6 @@ function Get-RESWMObject
     }
     If ($Node -eq 'application')
     {
-        #Select-Xml -Path $RESWMCache\$Source -XPath "//$Node$FullFilter" | select -ExpandProperty Node
         Select-Xml -Xml $XML -XPath "/*/*$FullFilter" | select -ExpandProperty Node
     }
     else
@@ -317,10 +365,10 @@ function Connect-RESWMCache
             }
             Try
             {
-                Switch ($ComputerName)
+                Switch -Wildcard ($ComputerName)
                 {
-                    localhost {$Registry = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine','Default')}
-                    Default   {$Registry = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey('LocalMachine', $ComputerName)}
+                    "$env:COMPUTERNAME.*" {$Registry = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine','Default')}
+                    Default               {$Registry = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey('LocalMachine', $ComputerName)}
                 }
                 
                 Write-Verbose 'Registrykey is available'
@@ -425,6 +473,9 @@ function Connect-RESWMCache
    Get-RESWMApplication -AppID 102
    Get RESWM Application with AppID 102
 .EXAMPLE
+   Get-RESWMApplication -User CONTOSO\User001
+   Get RESWM Application(s) for User001
+.EXAMPLE
    Get-RESWMApplication -Filter "enabled = 'yes'"
    Get enabled RESWM Applications
 .EXAMPLE
@@ -467,6 +518,12 @@ function Get-RESWMApplication
         [RESWMMenu]
         $MenuFolder,
 
+        # User that has access
+        [Parameter(ParameterSetName='User',
+                   Position=0)]
+        [RESWMUser]
+        $User,
+
         # Xpath filter for the application based on the full object
         [string]
         $Filter
@@ -495,6 +552,11 @@ function Get-RESWMApplication
     elseif ($PSBoundParameters['MenuFolder'])
     {
         $Params.Add('Filter',"parentguid = '{$($MenuFolder.GUID)}'")
+    }
+    elseif ($PSBoundParameters['User'])
+    {
+        $Params.Add('User',$User)
+        return [RESWMApplication[]](Get-RESWMObject @Params) | where Path -NE 'Disabled!'
     }
     [RESWMApplication[]](Get-RESWMObject @Params)
 }
@@ -556,6 +618,9 @@ function Get-RESWMStartMenu
 .EXAMPLE
    Get-RESWMSecurityRole -Name HelpDesk
    Get the security role named HelpDesk
+.EXAMPLE
+   Get-RESWMSecurityRole -User CONTOSO\User001
+   Get the security role(s) for User001
 #>
 function Get-RESWMSecurityRole
 {
@@ -575,7 +640,13 @@ function Get-RESWMSecurityRole
         [Parameter(ParameterSetName='GUID',
                    Position=0)]
         [guid]
-        $GUID
+        $GUID,
+
+        # User that has access
+        [Parameter(ParameterSetName='User',
+                   Position=0)]
+        [RESWMUser]
+        $User
     )
 
     $Params = @{
@@ -589,6 +660,10 @@ function Get-RESWMSecurityRole
     elseif ($PSBoundParameters['GUID'])
     {
         $Params.Add('Filter',"guid = '{$GUID}'")
+    }
+    elseif ($PSBoundParameters['User'])
+    {
+        $Params.Add('User',$User)
     }
     [RESWMSecRole[]](Get-RESWMObject @Params)
 }
@@ -604,16 +679,27 @@ function Get-RESWMSecurityRole
 .EXAMPLE
    Get-RESWMMapping -DriveLetter H
    Get drive mapping for drive H:\
+.EXAMPLE
+   Get-RESWMMapping -User CONTOSO\User001
+   Get drive mapping(s) for User001
 #>
 function Get-RESWMMapping
 {
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName='Letter')]
     [Alias('gwmm')]
     [OutputType([RESWMMapping])]
     Param
     (
         # Device drive letter
-        $DriveLetter
+        [Parameter(ParameterSetName='Letter',
+                   Position=0)]
+        $DriveLetter,
+
+        # User that has access
+        [Parameter(ParameterSetName='User',
+                   Position=0)]
+        [RESWMUser]
+        $User
     )
 
     $Params = @{
@@ -623,6 +709,10 @@ function Get-RESWMMapping
     If ($PSBoundParameters['DriveLetter'])
     {
         $Params.Add('Filter',"device = '$DriveLetter`:'")
+    }
+    elseif ($PSBoundParameters['User'])
+    {
+        $Params.Add('User',$User)
     }
     [RESWMMapping[]](Get-RESWMObject @Params)
 }
@@ -638,6 +728,12 @@ function Get-RESWMMapping
 .EXAMPLE
    Get-RESWMRegistry -Name iexplore*
    Get registry objects where name starts with iexplore
+.EXAMPLE
+   Get-RESWMApplication -Title 'Microsoft Word' | Get-RESWMRegistry
+   Get registry objects for application 'Microsoft Word'
+.EXAMPLE
+   Get-RESWMRegistry -User CONTOSO\User001
+   Get registry objects for User001
 #>
 function Get-RESWMRegistry
 {
@@ -653,13 +749,19 @@ function Get-RESWMRegistry
         [string]
         $Name,
 
+        # GUID of the security role
         [Parameter(ParameterSetName='GUID',
                    Position=0)]
-        # GUID of the security role
         [guid]
         $GUID,
 
-        # GUID of the security role
+        # User that has access
+        [Parameter(ParameterSetName='User',
+                   Position=0)]
+        [RESWMUser]
+        $User,
+
+        # GUID of the parent application
         [Parameter(ValueFromPipelineByPropertyName=$true,
                    ParameterSetName='ParentGUID',
                    Position=0)]
@@ -684,6 +786,10 @@ function Get-RESWMRegistry
         elseif ($PSBoundParameters['ParentGUID'])
         {
             $Params.Add('Filter',"parentguid = '{$ParentGUID}'")
+        }
+        elseif ($PSBoundParameters['User'])
+        {
+            $Params.Add('User',$User)
         }
         [RESWMRegistry[]](Get-RESWMObject @Params)
     }
@@ -737,13 +843,15 @@ function Get-RESWMZone
 
 <#
 .Synopsis
-   Short description
+   Get RES ONE Workspace PowerZone
 .DESCRIPTION
-   Long description
+   Get RES ONE Workspace PowerZone
 .EXAMPLE
-   Example of how to use this cmdlet
+   Get-RESWMUserPreference -Name 'Office 2016'
+   Get a user preference object named 'Office 2016'
 .EXAMPLE
-   Another example of how to use this cmdlet
+   Get-RESWMApplication -Title Notepad | Get-RESWMUserPreference
+   Get user preference object(s) for application Notepad
 #>
 function Get-RESWMUserPreference
 {
@@ -805,6 +913,9 @@ function Get-RESWMUserPreference
 .EXAMPLE
    Get-RESWMPrinter -Driver Lexmark*
    Get RES WM printer with a Lexmark driver
+.EXAMPLE
+   Get-RESWMPrinter -User CONTOSO\User001
+   Get RES WM printer(s) for User001
 #>
 function Get-RESWMPrinter
 {
@@ -830,7 +941,13 @@ function Get-RESWMPrinter
                    Position=0)]
         [SupportsWildcards()]
         [string]
-        $Driver
+        $Driver,
+
+        # User that has access
+        [Parameter(ParameterSetName='User',
+                   Position=0)]
+        [RESWMUser]
+        $User
     )
 
     $Params = @{
@@ -932,13 +1049,16 @@ function Update-RESWMAgentCache
 
 <#
 .Synopsis
-   Short description
+   Reset user preferences for a single user
 .DESCRIPTION
-   Long description
+   Reset a user preference for a single user by moving the corresponding 
+   upf/upr files to a backup folder.
 .EXAMPLE
-   Example of how to use this cmdlet
+   Reset-RESWMUserPreference -UserPreference 'Office 2016' -User CONTOSO\User1234 -ZeroProfilePath O:\pwrmenu
+   Reset user preference named 'Office 2016' for user CONTOSO\User1234 on O:\pwrmenu
 .EXAMPLE
-   Another example of how to use this cmdlet
+   Get-RESWMApplication -AppID 104 | Get-RESWMUserPreference | Reset-RESWMUserPreference -User CONTOSO\User1234 -ZeroProfilePath \\SVR-FILE-001\%USERNAME%$\pwrmenu
+   Reset all user preference object on application with Id 104
 #>
 function Reset-RESWMUserPreference
 {
@@ -973,12 +1093,22 @@ function Reset-RESWMUserPreference
     Begin
     {
         Write-Verbose 'Determining path to users user preferences...'
-        $Drive = Get-RESWMMapping -DriveLetter $ZeroProfilePath.Substring(0,1) | where {
-            (Compare-Object $_.Accesscontrol.Access.Object $User.MemberOf -IncludeEqual | where SideIndicator -eq '==') -or
-            ($_.Accesscontrol.Access.Object -contains "$User")
+        If ($ZeroProfilePath.StartsWith('\\'))
+        {
+            $Root = $ZeroProfilePath.replace('%USERNAME%',$User.Name)
         }
-        $ShareName = $Drive.ShareName.replace('%USERNAME%',$User.Name)
-        $Root = "$ShareName\$(Split-Path $ZeroProfilePath -Leaf)"
+        else
+        {
+            If ($Drive = Get-RESWMMapping -User $User | where Device -EQ "$($ZeroProfilePath.Substring(0,1)):")
+            {        
+                $ShareName = $Drive.ShareName.replace('%USERNAME%',$User.Name)
+                $Root = "$ShareName\$(Split-Path $ZeroProfilePath -Leaf)"
+            }
+            else
+            {
+                Write-Error -Message "Unable to find drive mapping [$($ZeroProfilePath.Substring(0,1)):] for this user" -Category ObjectNotFound -ErrorAction Stop
+            }
+        }
         If ((Get-PSDrive WMCache).Credential.UserName)
         {
             $Credential = (Get-PSDrive WMCache).Credential
