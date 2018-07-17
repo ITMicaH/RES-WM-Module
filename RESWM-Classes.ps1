@@ -106,7 +106,7 @@ class RESWMMenu
         }
         else
         {
-            $MenuNode = (Select-Xml -Path $global:RESWMCache\Objects\menutree.xml -XPath "//menu[@guid = '$($XMLNode.guid)']").Node
+            $MenuNode = (Select-Xml -Path WMCache:\Objects\menutree.xml -XPath "//menu[@guid = '$($XMLNode.guid)']").Node
             $arrPath = New-Object System.Collections.ArrayList
             Do
             {
@@ -152,6 +152,11 @@ class RESWMZone
             }
         }
     }
+
+    [string] ToString ()
+    {
+        return $this.Name
+    }
 }
 
 # AD Organizational Unit
@@ -181,19 +186,29 @@ class RESWMOU
 # AD user
 class RESWMUser
 {
-    [string] $Name
-    [string] $DistinghuishedName
-    [string] $Domain
+    [string]   $Name
+    [string]   $DistinghuishedName
+    [string]   $Domain
     [string[]] $MemberOf
+    [string]   $SID
+    hidden [string]   $ParentOU
 
     RESWMUser ([string] $User)
     {
-        $UserName = $User.Split('\')[1]
-        $DomainName = $User.Split('\')[0]
+        If ($User -notlike '*\*')
+        {
+            $UserName = $User
+            $DomainName = $env:USERDOMAIN
+        }
+        else
+        {
+            $UserName = $User.Split('\')[1]
+            $DomainName = $User.Split('\')[0]
+        }
         $forest = [System.DirectoryServices.ActiveDirectory.Forest]::GetCurrentForest()
         $ADDomain = $forest.Domains | where Name -Like "$DomainName.*"
         $ADSearcher = [adsisearcher]::new($ADDomain.GetDirectoryEntry(),"(&(objectClass=user)(SamAccountName=$UserName))")
-        $ADSearcher.PropertiesToLoad.AddRange(@('name','distinguishedname','objectClass','memberof'))
+        $ADSearcher.PropertiesToLoad.AddRange(@('name','distinguishedname','objectClass','objectsid','memberof'))
         $Account = $ADSearcher.FindAll()
         $this.Name = $Account.Properties.name[0]
         $this.DistinghuishedName = $Account.Properties.distinguishedname[0]
@@ -203,6 +218,10 @@ class RESWMUser
             $DomainName = $_.Split(',').where({$_ -like 'DC=*'})[0].TrimStart('DC=')
             "$DomainName\$GroupName"
         })
+        $this.SID = New-Object System.Security.Principal.SecurityIdentifier($Account.Properties.objectsid[0],0)
+        $OU = $this.DistinghuishedName.Split(',')[1..($this.DistinghuishedName.Split(',').count - 1)] -join ','
+        $ADOU = [adsi]"LDAP://$ADDomain/$OU"
+        $this.ParentOU = $ADOU.properties.objectguid[0].ForEach({$_.ToString('x2')}) -join ''
     }
 
     RESWMUser ([string] $UserName, [string] $Domain)
@@ -242,8 +261,7 @@ class RESWMAccCtrl
         {
             all       {$this.Access = 'Everyone'}
             group     {$this.Access = $XMLNode.grouplist.group}
-            secrole   {$this.Access = $XMLNode.secroles.secrole.foreach({
-                            Get-RESWMSecurityRole -GUID $_})}
+            secrole   {$this.Access = $XMLNode.secroles.secrole.foreach({[RESWMAccess]::new('SecurityRole',$_)})}
             delegated {$this.Access = @($XMLNode.appmanlist.appmanglobal).foreach({
                             [RESWMAccess]::new($_,'Delegated')})}
             ou        {$this.Access = $XMLNode.oufingerprint.ou}
@@ -253,16 +271,20 @@ class RESWMAccCtrl
 
     [string] ToString()
     {
-        return $this.Access.ForEach({$_.ToString()}) -join " $($this.AccessMode.ToLower()) "
+        $Group = $this.Access | where type -ne 'powerzone'
+        $Zone = $this.Access | where type -eq 'powerzone'
+        $AllGroups = $Group.ForEach({$_.ToString()}) -join " $($this.AccessMode.ToLower()) "
+        $AllZones = $Zone.ForEach({$_.ToString()}) -join " $($this.ZoneMode.ToLower()) "
+        return "$AllGroups and $AllZones"
     }
 }
 
 class RESWMAccess
 {
-    [string] $Type
-    [string] $Object
-    [string] $SID
-    [string] $Options
+    [string]   $Type
+    [psobject] $Object
+    [string]   $SID
+    [string]   $Options
 
     RESWMAccess ([XmlElement] $XMLNode)
     {
@@ -288,6 +310,15 @@ class RESWMAccess
         switch ($Type)
         {
             Delegated {$this.SID = $XMLNode.sid;$this.object = $XMLNode.InnerText}
+        }
+    }
+
+    RESWMAccess ([string] $Type, [guid] $GUID)
+    {
+        $this.Type = $Type
+        switch ($Type)
+        {
+            SecurityRole {$this.object = Get-RESWMSecurityRole -GUID $GUID}
         }
     }
 
@@ -474,7 +505,7 @@ class RESWMRegistry
             00000000-0000-0000-0000-000000000000 {$this.Location = 'Global'}
             default {$this.Location = 'Application'}
         }
-        $this.Registry = Get-WMREGFile "$global:RESWMCache\Resources\pl_reg\{$($this.GUID)}.reg"
+        $this.Registry = Get-WMREGFile "WMCache:\Resources\pl_reg\{$($this.GUID)}.reg"
     }
 }
 
