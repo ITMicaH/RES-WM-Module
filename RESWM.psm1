@@ -14,13 +14,24 @@ function Test-CacheConnection
     Param()
     If ($Drive = Get-PSDrive WMCache)
     {
-        $Computer = $Drive.Root.Split('\')[2]
-        If ($Computer -ne 'localhost')
+        $Server = $Drive.Root.Split('\')[2]
+        If ($Server -ne 'localhost')
         {
             foreach ($Time in (1..4))
             {
-                If (Test-Connection $Computer -Count 1 -Quiet)
+                If (Test-Connection $Server -Count 1 -Quiet)
                 {
+                    If (!(Test-Path wmcache:\))
+                    {
+                        $Params = @{
+                            Server = $Server
+                        }
+                        If ($Drive.Credential.UserName)
+                        {
+                            $Params.Add('Credential',$Drive.Credential)
+                        }
+                        Connect-RESWMRelayServer @Params
+                    }
                     return
                 }
                 else
@@ -29,9 +40,9 @@ function Test-CacheConnection
                 }
             }
             $Params = @{
-                Message = "Connection to cache on $Computer is lost."
+                Message = "Connection to cache on $Server is lost."
                 Category = 'ConnectionError'
-                TargetObject = $Computer
+                TargetObject = $Server
                 RecommendedAction = "Connect to a differrent computer."
                 ErrorAction = 'Stop'
             }
@@ -51,10 +62,12 @@ function Test-CacheConnection
    Get a RES WM object from a cache xml
 .EXAMPLE
    Get-RESWMObject -Source Objects\apps.xml -Node application -Filter "enabled = 'yes'"
+.EXAMPLE
+   Get-RESWMObject -Source Objects\apps.xml -Node application -User CONTOSO\User001
 #>
 function Get-RESWMObject
 {
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName='Filter')]
     [OutputType([XmlNode])]
     Param
     (
@@ -69,10 +82,12 @@ function Get-RESWMObject
         $Node,
 
         # Filter using Xpath
+        [Parameter(ParameterSetName='Filter')]
         [string]
         $Filter,
 
         # Filter on user
+        [Parameter(ParameterSetName='User')]
         [RESWMUser]
         $User
     )
@@ -124,18 +139,18 @@ function Get-RESWMObject
         switch ($Node)
         {
             application  {
-                $GroupCheck = $User.MemberOf.ForEach({"*/grouplist/group='$_'"}) -join ' or '
-                $NotGroupCheck = '(not(' + ($User.MemberOf.ForEach({"*/notgrouplist/group='$_'"}) -join ' or ') + '))'
-                $UserCheck = "*/grouplist/group='$User'"
-                $NotUserCheck = "(not(*/notgrouplist/group='$User'))"
-                $Everyone = "*/accesstype='all'"
-                $FullFilter = "[(*/*/ou = '$($User.ParentOU)' or $Everyone or $UserCheck or $GroupCheck) and ($NotGroupCheck or $NotUserCheck) and (not(system = 'yes'))]"
+                $GroupCheck = $User.MemberOf.ForEach({"*/*/*/grouplist/group='$_'"}) -join ' or '
+                $NotGroupCheck = '(not(' + ($User.MemberOf.ForEach({"*/*/*/notgrouplist/group='$_'"}) -join ' or ') + '))'
+                $UserCheck = "*/*/*/grouplist/group='$User'"
+                $NotUserCheck = "(not(*/*/*/notgrouplist/group='$User'))"
+                $Everyone = "*/*/*/accesstype='all'"
+                $FullFilter = "[(*/*/*/*/ou = '$($User.ParentOU)' or $Everyone or $UserCheck or $GroupCheck) and ($NotGroupCheck or $NotUserCheck) and (not(system = 'yes'))]"
             }
             Default      {
-                $GroupCheck = $User.MemberOf.ForEach({"(*/access[object='$_' and (not(options='notingroup'))])"}) -join ' or '
-                $UserCheck = "(*/access[object='$User' and (not(options='notuser'))])"
-                $Everyone = "*/access/type='global'"
-                $FullFilter = "[(*/*/ou = '$($User.ParentOU)' or $Everyone or $UserCheck or $GroupCheck) and (not(system = 'yes'))]"
+                $GroupCheck = $User.MemberOf.ForEach({"(*/*/*/access[object='$_' and (not(options='notingroup'))])"}) -join ' or '
+                $UserCheck = "(*/*/*/access[object='$User' and (not(options='notuser'))])"
+                $Everyone = "*/*/*/access/type='global'"
+                $FullFilter = "[(*/*/*/*/ou = '$($User.ParentOU)' or $Everyone or $UserCheck or $GroupCheck) and (not(system = 'yes'))]"
             }
         }
     }
@@ -311,36 +326,31 @@ function Get-WMREGFile
 
 <#
 .Synopsis
-   Connect to a remote RES One Workspace cache
+   Connect to a remote RES One Workspace Relayserver
 .DESCRIPTION
-   Connect to the RES One Workspace cache on a remote Relay server or an agent.
+   Connect to the RES One Workspace cache on a remote Relayserver.
 .EXAMPLE
-   Connect-RESWMCache -ComputerName RelaySvr001
-   Connecting to cache on Relay server RelaySvr001
+   Connect-RESWMRelayServer -Server RelaySvr001
+   Connecting to Relayserver RelaySvr001
 .EXAMPLE
-   Connect-RESWMCache -ComputerName WMAgent001 -Type Agent
-   Connecting to cache on agent WMAgent001
+   Connect-RESWMRelayServer -Server RelaySvr001 -Environment RESWM@svr-sql-001
+   Connecting to environment RESWM@svr-sql-001 on Relayserver RelaySvr001
 #>
-function Connect-RESWMCache
+function Connect-RESWMRelayServer
 {
     [CmdletBinding()]
-    [Alias('cwmc')]
+    [Alias('cwmr')]
     [OutputType()]
     Param
     (
-        # Name of RES One Workspace Agent
+        # Name of RES One Workspace RelayServer
         [Parameter(ValueFromPipelineByPropertyName=$true,
                    Position=0)]
         [Alias('SamAccountName','Agent')]
         [string]
-        $ComputerName = 'localhost',
+        $Server,
 
-        # Type of cache you're connecting to.
-        [ValidateSet('RelayServer','Agent')]
-        [string]
-        $Type = 'Agent',
-
-        # Credential to connect to remote agent.
+        # Credential to connect to RelayServer.
         [PSCredential]
         [System.Management.Automation.CredentialAttribute()]
         $Credential,
@@ -356,99 +366,103 @@ function Connect-RESWMCache
 
     Process
     {
-        $ComputerName = [System.Net.Dns]::GetHostByName($ComputerName).HostName # FQDN
-        If (Test-Connection -ComputerName $ComputerName -Count 1 -Quiet)
+        $Server = [System.Net.Dns]::GetHostByName($Server).HostName # FQDN
+        If (!(Test-Connection -ComputerName $Server -Count 1 -Quiet))
         {
-            If ($Type -eq 'RelayServer')
-            {
-                $Subkey = 'RelayServer'
+            Write-Error "Computer [$Server] appears to be offline" -Category ConnectionError -ErrorAction Stop
+        }
+        Try
+        {
+            $Params = @{
+                Class = "StdRegProv"
+                Namespace = 'root\default'
+                Computername = $Server
+                List = $true
             }
-            Try
+            If ($PSBoundParameters['Credential'])
             {
-                Switch -Wildcard ($ComputerName)
-                {
-                    "$env:COMPUTERNAME.*" {$Registry = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine','Default')}
-                    Default               {$Registry = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey('LocalMachine', $ComputerName)}
-                }
-                
-                Write-Verbose 'Registrykey is available'
-                If (!($RESWMKey = $Registry.OpenSubKey("SOFTWARE\WOW6432Node\RES\Workspace Manager\$Subkey")))
-                {
-                    If (!($RESWMKey = $Registry.OpenSubKey("SOFTWARE\RES\Workspace Manager\$Subkey")))
+                $Params.Add('Credential',$Credential)
+            }
+            $Registry = Get-Wmiobject @Params
+            [uint32]$hklm = 2147483650   
+        }
+        catch
+        {
+            Write-Error "Unable to connect to registry" -Category ConnectionError -TargetObject $Server -ErrorAction Stop
+        }
+        Write-Verbose "Attempting to retreive cache folder on Relay Server $Server"
+        If (!($Environments = $Registry.EnumKey($hklm,"SOFTWARE\RES\Workspace Manager\RelayServer\Environments\").sNames))
+        {
+            $Environments = $Registry.EnumKey($hklm,"SOFTWARE\Wow6432Node\RES\Workspace Manager\RelayServer\Environments\").sNames
+            $x64 = '\Wow6432Node'
+        }
+        If ($Environments)
+        {
+            If (@($Environments).count -eq 1)
+            {
+                $Cache = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$Environments\Local",'CacheLocation').sValue
+                $StageID = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$Environments\Local",'StageId').sValue
+                $CacheLocation = $Cache.Replace(':','$') + "\$Environments\Cache\$StageID"
+            }
+            elseif ($PSBoundParameters['Environment'])
+            {
+                $Environments.ForEach({
+                    $EnvironmentName = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$_",'EnvironmentName').sValue
+                    If ($EnvironmentName -eq $PSBoundParameters['Environment'])
                     {
-                        Write-Error "RES ONE Workspace is not installed on computer [$ComputerName]" -Category NotInstalled -ErrorAction Stop
+                        $Cache = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$_\Local",'CacheLocation').sValue
+                        $StageID = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$_\Local",'StageId').sValue
+                        $CacheLocation = $Cache.Replace(':','$') + "\$_\Cache\$StageID"
+                        continue
                     }
-                }
+                })
             }
-            catch
+            else
             {
-                Write-Error "Unable to connect to registry" -Category ConnectionError -TargetObject $ComputerName -ErrorAction Stop
-            }
-            switch ($Type)
-            {
-                <#RelayServer {
-                    Write-Verbose "Attempting to retreive cache folder on Relay Server $ComputerName"
-                    If ($Environments = $RESWMKey.OpenSubKey('Environments'))
+                $AllEnvironments = $Environments.ForEach({
+                    @{
+                        Path = "SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$_"
+                        Value = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$_",'EnvironmentName').sValue
+                    }
+                })
+                $Environment = Read-Host "Please specify which RES One Workspace environment to connect to ($($AllEnvironments.Value -join ','))"
+                If ($Environment)
+                {
+                    If ($ChosenEnv = $AllEnvironments.Where({$_.Value -eq $Environment}))
                     {
-                        If ($Environments.GetSubKeyNames().count -eq 1)
-                        {
-                            $EnvironmentID = $Environments.GetSubKeyNames()
-                            $CacheLocation = $Environments.OpenSubKey("$EnvironmentID\Local").GetValue('CacheLocation').Replace(':','$')
-                            $global:RESWMCache = Get-ChildItem "\\$ComputerName\$CacheLocation\$EnvironmentID\Cache" | select -Last 1 | Get-Item
-                        }
-                        elseif ($PSBoundParameters['Environment'])
-                        {
-                            $Environments.GetSubKeyNames().ForEach({
-                                If ($Environments.OpenSubKey($_).GetValue('EnvironmentName') -eq $PSBoundParameters['Environment'])
-                                {
-                                    $CacheLocation = $Environments.OpenSubKey("$_\Local").GetValue('CacheLocation').Replace(':','$')
-                                    $global:RESWMCache = Get-ChildItem "\\$ComputerName\$CacheLocation\$EnvironmentID\Cache" | select -Last 1 | Get-Item
-                                    continue
-                                }
-                            })
-                        }
-                        else
-                        {
-                            $AllEnvironments = $Environments.GetSubKeyNames().ForEach({
-                                $Environments.OpenSubKey($_).GetValue('EnvironmentName')
-                            })
-                            Write-Error "Please specify which RES One Workspace environment to connect to: $($AllEnvironments -join ',')" -Category NotSpecified -ErrorAction Stop
-                        }
+                        $Cache = $Registry.GetStringValue($hklm,"$($ChosenEnv.Path)\Local",'CacheLocation').sValue
+                        $StageID = $Registry.GetStringValue($hklm,"$($ChosenEnv.Path)\Local",'StageId').sValue
+                        $CacheLocation = $Cache.Replace(':','$') + "\$($ChosenEnv.Path.Split('\')[-1])\Cache\$StageID"
                     }
                     else
                     {
-                        Write-Error "No RelayServer environments found" -Category ObjectNotFound -TargetObject $ComputerName -ErrorAction Stop
+                        Write-Error "Environment [$Environment] not recognized. Should be one of the following: $($AllEnvironments.Value -join ',')" -Category ObjectNotFound -ErrorAction Stop
                     }
-                }#>
-                Agent {
-                    Write-Verbose "Attempting to retreive cache folder on Agent $ComputerName"
-                    $WMCache = @{
-                        Name = 'WMCache'
-                        PSProvider = 'FileSystem'
-                        Root = "\\$ComputerName\$($RESWMKey.GetValue('InstallDir').Replace(':','$'))Data\DBCache"
-                    }
-                    If ($Registry.GetValue('LocalCachePath'))
-                    {
-                        $WMCache.Root = "\\$ComputerName\$($RESWMKey.GetValue('LocalCachePath').Replace(':','$'))"
-                    }
-                    If ($PSBoundParameters['Credential'])
-                    {
-                        $WMCache.Add('Credential',$Credential)
-                    }
-                    Get-PSDrive -Name WMCache  -ErrorAction SilentlyContinue | Remove-PSDrive
-                    $RESDrive = New-PSDrive @WMCache -Scope global -ErrorAction Stop
-                    #[RESWMConnection]$global:RESWMCache = $WMCache
-                    $global:AppMenus = @{}
-                    (Select-Xml WMCache:\Objects\app_menus.xml -XPath '//applicationmenu').Node.foreach({
-                        $AppMenus.Add($_.guid,$_.title)
-                    })
+                }
+                else
+                {
+                    Write-Error "No enviroment to connect to." -Category NotSpecified -ErrorAction Stop
                 }
             }
+            $WMCache = @{
+                Name = 'WMCache'
+                PSProvider = 'FileSystem'
+                Root = "\\$Server\$CacheLocation"
+            }
+            If ($PSBoundParameters['Credential'])
+            {
+                $WMCache.Add('Credential',$Credential)
+            }
+            Get-PSDrive -Name WMCache  -ErrorAction SilentlyContinue | Remove-PSDrive
+            $RESDrive = New-PSDrive @WMCache -Scope global -ErrorAction Stop
+            $global:AppMenus = @{}
+            (Select-Xml WMCache:\Objects\app_menus.xml -XPath '//objectinfo').Node.foreach({
+                $AppMenus.Add($_.guid,$_.config.applicationmenu.title)
+            })
         }
         else
         {
-            Write-Error "Computer [$ComputerName] appears to be offline" -Category ConnectionError
-            return
+            Write-Error "No RelayServer environments found" -Category ObjectNotFound -TargetObject $Server -ErrorAction Stop
         }
         If ($PSBoundParameters['PassThru'])
         {
@@ -535,7 +549,7 @@ function Get-RESWMApplication
     }
     If ($PSBoundParameters['Title'])
     {
-        $Params.Add('Filter',"configuration/title = '$Title'")
+        $Params.Add('Filter',"config/application/configuration/title = '$Title'")
     }
     elseif ($PSBoundParameters['AppID'])
     {
@@ -551,12 +565,12 @@ function Get-RESWMApplication
     }
     elseif ($PSBoundParameters['MenuFolder'])
     {
-        $Params.Add('Filter',"parentguid = '{$($MenuFolder.GUID)}'")
+        $Params.Add('Filter',"parentguid = '{$($MenuFolder.GUID)}'") 
     }
     elseif ($PSBoundParameters['User'])
     {
         $Params.Add('User',$User)
-        return [RESWMApplication[]](Get-RESWMObject @Params) | where Path -NE 'Disabled!'
+        return [RESWMApplication[]](Get-RESWMObject @Params) | where {$_.Enabled -eq $true -and $_.Path -ne 'Disabled!'}
     }
     [RESWMApplication[]](Get-RESWMObject @Params)
 }
@@ -598,7 +612,7 @@ function Get-RESWMStartMenu
     }
     If ($PSBoundParameters['Title'])
     {
-        $Params.Add('Filter',"title = '$Title'")
+        $Params.Add('Filter',"config/applicationmenu/title = '$Title'")
     }
     elseif ($PSBoundParameters['GUID'])
     {
@@ -703,12 +717,12 @@ function Get-RESWMMapping
     )
 
     $Params = @{
-        Source = 'Objects\mappings.xml'
+        Source = 'Objects\pl_map.xml'
         Node = 'mapping'
     }
     If ($PSBoundParameters['DriveLetter'])
     {
-        $Params.Add('Filter',"device = '$DriveLetter`:'")
+        $Params.Add('Filter',"config/mapping/device = '$DriveLetter`:'")
     }
     elseif ($PSBoundParameters['User'])
     {
@@ -777,7 +791,7 @@ function Get-RESWMRegistry
         }
         If ($PSBoundParameters['Name'])
         {
-            $Params.Add('Filter',"name = '$Name'")
+            $Params.Add('Filter',"config/registry/name = '$Name'")
         }
         elseif ($PSBoundParameters['GUID'])
         {
@@ -832,7 +846,7 @@ function Get-RESWMZone
     }
     If ($PSBoundParameters['Name'])
     {
-        $Params.Add('Filter',"Name = '$Name'")
+        $Params.Add('Filter',"config/powerzone/name = '$Name'")
     }
     elseif ($PSBoundParameters['GUID'])
     {
@@ -843,9 +857,9 @@ function Get-RESWMZone
 
 <#
 .Synopsis
-   Get RES ONE Workspace PowerZone
+   Get RES ONE Workspace User Preference
 .DESCRIPTION
-   Get RES ONE Workspace PowerZone
+   Get RES ONE Workspace User Preference
 .EXAMPLE
    Get-RESWMUserPreference -Name 'Office 2016'
    Get a user preference object named 'Office 2016'
@@ -879,24 +893,26 @@ function Get-RESWMUserPreference
         [RESWMApplication]
         $Application
     )
-
-    $Params = @{
-        Source = 'Objects\user_prefs.xml'
-        Node = 'desktop_userpreferences/profile'
-    }
-    If ($PSBoundParameters['Name'])
+    Process
     {
-        $Params.Add('Filter',"Name = '$Name'")
+        $Params = @{
+            Source = 'Objects\user_prefs.xml'
+            Node = 'profile'
+        }
+        If ($PSBoundParameters['Name'])
+        {
+            $Params.Add('Filter',"config/profile/name = '$Name'")
+        }
+        elseif ($PSBoundParameters['GUID'])
+        {
+            $Params.Add('Filter',"guid = '{$GUID}'")
+        }
+        elseif ($PSBoundParameters['Application'])
+        {
+            $Params.Add('Filter',"parentguid = '{$($Application.GUID)}'")
+        }
+        [RESWMUserPref[]](Get-RESWMObject @Params)
     }
-    elseif ($PSBoundParameters['GUID'])
-    {
-        $Params.Add('Filter',"guid = '{$GUID}'")
-    }
-    elseif ($PSBoundParameters['Application'])
-    {
-        $Params.Add('Filter',"parentguid = '{$($Application.GUID)}'")
-    }
-    [RESWMUserPref[]](Get-RESWMObject @Params)
 }
 
 <#
@@ -956,7 +972,7 @@ function Get-RESWMPrinter
     }
     If ($PSBoundParameters['Name'])
     {
-        $Params.Add('Filter',"printer = '$Name'")
+        $Params.Add('Filter',"config/printermapping/printer = '$Name'")
     }
     elseif ($PSBoundParameters['GUID'])
     {
@@ -964,7 +980,7 @@ function Get-RESWMPrinter
     }
     elseif ($PSBoundParameters['Driver'])
     {
-        $Params.Add('Filter',"driver = '$Driver'")
+        $Params.Add('Filter',"config/printermapping/driver = '$Driver'")
     }
     [RESWMPrinter[]](Get-RESWMObject @Params)
 }
@@ -1083,7 +1099,7 @@ function Reset-RESWMUserPreference
         [Parameter(Mandatory=$false,
                    Position=2)]
         [string]
-        $ZeroProfilePath = 'U:\pwrmenu',
+        $ZeroProfilePath,
 
         # Show profile files in backup folder
         [switch]
@@ -1093,6 +1109,11 @@ function Reset-RESWMUserPreference
     Begin
     {
         Write-Verbose 'Determining path to users user preferences...'
+        If (!$PSBoundParameters['ZeroProfilePath'])
+        {
+            $Drive = (Select-Xml -Path WMCache:\settings.xml -XPath "//setting[name = 'DriveUserSettings']").Node.value
+            $ZeroProfilePath = "$Drive`:" + (Select-Xml -Path WMCache:\settings.xml -XPath "//setting[name = 'LocationUserSettings']").Node.value
+        }
         If ($ZeroProfilePath.StartsWith('\\'))
         {
             $Root = $ZeroProfilePath.replace('%USERNAME%',$User.Name)
@@ -1109,6 +1130,7 @@ function Reset-RESWMUserPreference
                 Write-Error -Message "Unable to find drive mapping [$($ZeroProfilePath.Substring(0,1)):] for this user" -Category ObjectNotFound -ErrorAction Stop
             }
         }
+
         If ((Get-PSDrive WMCache).Credential.UserName)
         {
             $Credential = (Get-PSDrive WMCache).Credential
@@ -1132,7 +1154,8 @@ function Reset-RESWMUserPreference
                     If ($Credential)
                     {
                         Write-Verbose "Running move command under account [$($Credential.UserName)]"
-                        Start-Process powershell.exe -ArgumentList "-Command `"Move-Item -Path '$($File.FullName)' -Destination '$UserPref\Backup\' -Force`"" -WindowStyle Hidden -Credential $Credential
+                        $ScriptBlock = {Param($File,$UserPref) Move-Item -Path "$($File.FullName)" -Destination "$UserPref\Backup\" -Force}
+                        Start-Job -ScriptBlock $Scriptblock -ArgumentList $File,$UserPref -Credential $Credential | Receive-Job -Wait -AutoRemoveJob
                     }
                     else
                     {
@@ -1145,7 +1168,7 @@ function Reset-RESWMUserPreference
         }
         else
         {
-            Write-Error "No user preferences found for this user." -Category ObjectNotFound
+            Write-Error "No user preferences found for this user." -Category ObjectNotFound -TargetObject $UserPref
         }
     }
     End
