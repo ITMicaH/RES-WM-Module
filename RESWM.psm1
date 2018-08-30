@@ -17,6 +17,7 @@ function Test-CacheConnection
         $Server = $Drive.Root.Split('\')[2]
         If ($Server -ne 'localhost')
         {
+            Write-Verbose "Checking cache connection to relayserver..."
             foreach ($Time in (1..4))
             {
                 If (Test-Connection $Server -Count 1 -Quiet)
@@ -30,8 +31,10 @@ function Test-CacheConnection
                         {
                             $Params.Add('Credential',$Drive.Credential)
                         }
+                        Write-Verbose "Reconnecting to relayserver $($Server.Split('.')[0])..."
                         Connect-RESWMRelayServer @Params
                     }
+                    Write-Verbose "RelayServer connection active."
                     return
                 }
                 else
@@ -39,11 +42,32 @@ function Test-CacheConnection
                     sleep -Milliseconds 3
                 }
             }
+            Write-Warning "Connection to relayserver $($Server.Split('.')[0]) is not active."
+            If ($RelayServers)
+            {
+                foreach ($RelayServer in $RelayServers.where({$_ -ne $Server}))
+                {
+                    Write-Verbose "Attempting to connect to relayserver $RelayServer..."
+                    If (Test-Connection $RelayServer -Count 1 -Quiet)
+                    {
+                        $Params = @{
+                            Server = $RelayServer
+                        }
+                        If ($Drive.Credential.UserName)
+                        {
+                            $Params.Add('Credential',$Drive.Credential)
+                        }
+                        Connect-RESWMRelayServer @Params
+                        Write-Verbose "RelayServer connection active."
+                        return
+                    }
+                }
+            }
             $Params = @{
-                Message = "Connection to cache on $Server is lost."
+                Message = "Unable to reconnect to RES ONE Workspace environment."
                 Category = 'ConnectionError'
                 TargetObject = $Server
-                RecommendedAction = "Connect to a differrent computer."
+                RecommendedAction = "Check relayservers."
                 ErrorAction = 'Stop'
             }
             Write-Error @Params
@@ -51,7 +75,7 @@ function Test-CacheConnection
     }
     else
     {
-        Write-Error "Not connected to RES WM cache" -Category ConnectionError -RecommendedAction "Run command Connect-RESWMCache"
+        Write-Error "Not connected to RES ONE Workspace relayserver" -Category ConnectionError -RecommendedAction "Run command Connect-RESWMRelayServer"
     }
 }
 
@@ -61,9 +85,9 @@ function Test-CacheConnection
 .DESCRIPTION
    Get a RES WM object from a cache xml
 .EXAMPLE
-   Get-RESWMObject -Source Objects\apps.xml -Node application -Filter "enabled = 'yes'"
+   Get-RESWMObject -Source Objects\apps.xml -Type application -Filter "enabled = 'yes'"
 .EXAMPLE
-   Get-RESWMObject -Source Objects\apps.xml -Node application -User CONTOSO\User001
+   Get-RESWMObject -Source Objects\apps.xml -Type application -User CONTOSO\User001
 #>
 function Get-RESWMObject
 {
@@ -76,10 +100,10 @@ function Get-RESWMObject
         [string]
         $Source,
 
-        # Name of the node we need
+        # Type of the object
         [Parameter(Mandatory=$true)]
         [string]
-        $Node,
+        $Type,
 
         # Filter using Xpath
         [Parameter(ParameterSetName='Filter')]
@@ -93,7 +117,8 @@ function Get-RESWMObject
     )
     
     Test-CacheConnection
-    [xml]$XML = (Get-Content WMCache:\$Source).Trim() # Trim counters empty (Description) node issue
+    $SubFolder = Get-ChildItem WMCache: | sort LastWriteTime | select -Last 1 -ExpandProperty Name
+    [xml]$XML = (Get-Content WMCache:\$SubFolder\$Source).Trim() # Trim counters empty (Description) node issue
     $FullFilter = ''
     If ($PSBoundParameters['Filter'])
     {
@@ -132,11 +157,11 @@ function Get-RESWMObject
                 }
             }
         }
-        $FullFilter = "[$($FullFilterArray -join ' ')]"
+        $FullFilter = $FullFilterArray -join ' '
     }
-    elseif ($PSBoundParameters['User'])
+    ElseIf ($PSBoundParameters['User'])
     {
-        switch ($Node)
+        switch ($Type)
         {
             application  {
                 $GroupCheck = $User.MemberOf.ForEach({"*/*/*/grouplist/group='$_'"}) -join ' or '
@@ -144,28 +169,28 @@ function Get-RESWMObject
                 $UserCheck = "*/*/*/grouplist/group='$User'"
                 $NotUserCheck = "(not(*/*/*/notgrouplist/group='$User'))"
                 $Everyone = "*/*/*/accesstype='all'"
-                $FullFilter = "[(*/*/*/*/ou = '$($User.ParentOU)' or $Everyone or $UserCheck or $GroupCheck) and ($NotGroupCheck or $NotUserCheck) and (not(system = 'yes'))]"
+                $FullFilter = "(*/*/*/*/ou = '$($User.ParentOU)' or $Everyone or $UserCheck or $GroupCheck) and ($NotGroupCheck or $NotUserCheck) and (not(system = 'yes'))"
             }
             Default      {
                 $GroupCheck = $User.MemberOf.ForEach({"(*/*/*/access[object='$_' and (not(options='notingroup'))])"}) -join ' or '
                 $UserCheck = "(*/*/*/access[object='$User' and (not(options='notuser'))])"
                 $Everyone = "*/*/*/access/type='global'"
-                $FullFilter = "[(*/*/*/*/ou = '$($User.ParentOU)' or $Everyone or $UserCheck or $GroupCheck) and (not(system = 'yes'))]"
+                $FullFilter = "(*/*/*/*/ou = '$($User.ParentOU)' or $Everyone or $UserCheck or $GroupCheck) and (not(system = 'yes'))"
             }
         }
     }
-    elseif ($Node -ne 'securityrole')
+    ElseIf ($Type -ne 'securityrole')
     {
-        $FullFilter = "[(not(system = 'yes'))]"
+        $FullFilter = "(not(system = 'yes'))"
     }
-    If ($Node -eq 'application')
-    {
-        Select-Xml -Xml $XML -XPath "/*/*$FullFilter" | select -ExpandProperty Node
-    }
-    else
-    {
-        Select-Xml -Xml $XML -XPath "/*/*$FullFilter" | select -ExpandProperty Node | Set-CapitalizedXMLValues -PassThru
-    }
+    #If ($Type -eq 'application')
+    #{
+        return (Select-Xml -Xml $XML -XPath "/*/*[$FullFilter]").Node
+    #}
+    #else
+    #{
+    #    Select-Xml -Xml $XML -XPath "/*/*[$FullFilter]" | select -ExpandProperty Node | Set-CapitalizedXMLValues -PassThru
+    #}
 }
 
 # Make sure all values in XML have a capitilized first letter
@@ -210,113 +235,128 @@ function Set-CapitalizedXMLValues
 # Convert content of a reg file to a registry object
 function Get-WMREGFile
 {
-    Param ($File)
+    Param ([string]$File,[switch]$ShowContent,[string]$SaveFile)
 
-    $RegType = 'Policy'
-    switch -Regex -File $File
+    $RegContent = [regex]::split($File,'(.{2})').where({$_}).forEach({[char]([convert]::toint16($_,16))}) -join '' -split "`r`n"
+    If ($PSBoundParameters['ShowContent'])
     {
-        ';<PFNAME>(.+)</PFNAME>' {
-            $RegType = 'Registry'
-            $Description = $Matches[1]
-        }
-        ';<PFDESC>(.+)</PFDESC>' {
-            $RegType = 'Registry'
-            If ($Matches[1] -ne ' ')
-            {
+        return $RegContent
+    }
+    If ($PSBoundParameters['SaveFile'])
+    {
+        return $RegContent | Set-Content -Path $SaveFile -PassThru
+    }
+    $RegType = 'Policy'
+    try{
+        switch -Regex ($RegContent)
+        {
+            ';<PFNAME>(.+)</PFNAME>' {
+                $RegType = 'Registry'
                 $Description = $Matches[1]
             }
-        }
-        '\[(?<Key>.+)\]' {
-            $Key = $Matches.Key
-        }
-        '"?(?<Name>[^"]+)"?=((?<Type>.{3,}):)?"?(?<Data>[^"]+)"?' {
-            If ($Matches.Type)
-            {
-                switch ($Matches.Type)
+            ';<PFDESC>(.+)</PFDESC>' {
+                $RegType = 'Registry'
+                If ($Matches[1] -ne ' ')
                 {
-                    hex     {
-                        $Type = 'Binary'
-                        If ($Matches.Data -like '*,\')
-                        {
-                            $Wait = $true
-                            $Data = $Matches.Data.TrimEnd('\')
-                        }
-                        else
-                        {
-                            $Data = [byte[]]$Matches.Data.Split(',').foreach({"0x$_"})
-                        }
-                    }
-                    'hex(2)' {
-                        $Type = 'ExpandString'
-                        If ($Matches.Data -like '*,\')
-                        {
-                            $Wait = $true
-                            $Data = $Matches.Data.TrimEnd('\')
-                        }
-                        else
-                        {
-                            $Data = [byte[]]$Matches.Data.Split(',').foreach({"0x$_"})
-                            $Data = [System.Text.Encoding]::Unicode.GetString($Data) -replace '\\\\','\'
-                        }
-                    }
-                    'hex(7)' {
-                        $Type = 'MultiString'
-                        If ($Matches.Data -like '*,\')
-                        {
-                            $Wait = $true
-                            $Data = $Matches.Data.TrimEnd('\')
-                        }
-                        else
-                        {
-                            $Data = [byte[]]$Matches.Data.Split(',').foreach({"0x$_"})
-                            $Data = [System.Text.Encoding]::Unicode.GetString($Data) -replace '\\\\','\'
-                        }
-                    }
-                    dword   {
-                        $Type = 'DWORD'
-                        $Data = [int]"0x$($Matches.Data)"
-                    }
-                    Default {
-                        $Type = $Matches.Type
-                        $Data = $Matches.Data
-                    }
+                    $Description = $Matches[1]
                 }
             }
-            else
-            {
-                $Type = 'String'
-                $Data = $Matches.Data -replace '\\\\','\'
+            '\[(?<Key>.+)\]' {
+                $Key = $Matches.Key
             }
-            If ($Matches.Name -eq '@')
-            {
-                $Name = '(Default)'
-            }
-            else
-            {
-                $Name = $Matches.Name
-            }
-            If (!$Wait -and $RegType -eq 'Registry')
-            {
-                [Registry]::new($Key,$Name,$Data,$Type,$Description)
-            }
-        }
-        '^;<PF>(.+)</PF>$' {
-            $Description = $Matches[1].split('\')[-1]
-            [Registry]::new($Key,$Name,$Data,$Type,$Description)
-        }
-        '^\s+(.{2},?)+\\?'     {
-            $Data = $Data + $Matches[0].Trim().TrimEnd('\')
-            If ($Matches[0] -notlike '*,\')
-            {
-                $Data = [byte[]]$Data.Split(',').foreach({"0x$_"})
-                If ($Type -ne 'Binary')
+            '"?(?<Name>[^"]+)"?=((?<Type>.{3,}):)?"?(?<Data>[^"]+)"?' {
+                If ($Matches.Type)
                 {
-                    $Data = [System.Text.Encoding]::Unicode.GetString($Data) -replace '\\\\','\'
+                    switch ($Matches.Type)
+                    {
+                        hex     {
+                            $Type = 'Binary'
+                            If ($Matches.Data -like '*,\')
+                            {
+                                $Wait = $true
+                                $Data = $Matches.Data.TrimEnd('\')
+                            }
+                            else
+                            {
+                                $Data = [byte[]]$Matches.Data.Split(',').foreach({"0x$_"})
+                            }
+                        }
+                        'hex(2)' {
+                            $Type = 'ExpandString'
+                            If ($Matches.Data -like '*,\')
+                            {
+                                $Wait = $true
+                                $Data = $Matches.Data.TrimEnd('\')
+                            }
+                            else
+                            {
+                                $Data = [byte[]]$Matches.Data.Split(',').foreach({"0x$_"})
+                                $Data = [System.Text.Encoding]::Unicode.GetString($Data) -replace '\\\\','\'
+                            }
+                        }
+                        'hex(7)' {
+                            $Type = 'MultiString'
+                            If ($Matches.Data -like '*,\')
+                            {
+                                $Wait = $true
+                                $Data = $Matches.Data.TrimEnd('\')
+                            }
+                            else
+                            {
+                                $Data = [byte[]]$Matches.Data.Split(',').foreach({"0x$_"})
+                                $Data = [System.Text.Encoding]::Unicode.GetString($Data) -replace '\\\\','\'
+                            }
+                        }
+                        dword   {
+                            $Type = 'DWORD'
+                            $Data = [int]"0x$($Matches.Data)"
+                        }
+                        Default {
+                            $Type = $Matches.Type
+                            $Data = $Matches.Data
+                        }
+                    }
                 }
+                else
+                {
+                    $Type = 'String'
+                    $Data = $Matches.Data -replace '\\\\','\'
+                }
+                If ($Matches.Name -eq '@')
+                {
+                    $Name = '(Default)'
+                }
+                else
+                {
+                    $Name = $Matches.Name
+                }
+                If (!$Wait -and $RegType -eq 'Registry')
+                {
+                    [Registry]::new($Key,$Name,$Data,$Type,$Description)
+                }
+            }
+            '^;<PF>(.+)</PF>$' {
+                $Description = $Matches[1].split('\')[-1]
                 [Registry]::new($Key,$Name,$Data,$Type,$Description)
-                $Wait = $false
+            }
+            '^\s+(.{2},?)+\\?'     {
+                $Data = $Data + $Matches[0].Trim().TrimEnd('\')
+                If ($Matches[0] -notlike '*,\')
+                {
+                    $Data = [byte[]]$Data.Split(',').foreach({"0x$_"})
+                    If ($Type -ne 'Binary')
+                    {
+                        $Data = [System.Text.Encoding]::Unicode.GetString($Data) -replace '\\\\','\'
+                    }
+                    [Registry]::new($Key,$Name,$Data,$Type,$Description)
+                    $Wait = $false
+                }
             }
         }
+    }
+    catch
+    {
+        Write-Error -Exception $_.exception
     }
 }
 
@@ -328,36 +368,55 @@ function Get-WMREGFile
 .Synopsis
    Connect to a remote RES One Workspace Relayserver
 .DESCRIPTION
-   Connect to the RES One Workspace cache on a remote Relayserver.
+   Connect to the RES One Workspace cache on a remote Relayserver. If not all users have
+   access to the servers registry and admin shares (E.G. C$,D$, etc.) you can share the 
+   cache folder manually and use the ShareName parameter to connect to the correct environment.
+   Make sure all relayservers have the same share using the same sharename.
 .EXAMPLE
    Connect-RESWMRelayServer -Server RelaySvr001
-   Connecting to Relayserver RelaySvr001
+   Connects to Relayserver RelaySvr001
 .EXAMPLE
    Connect-RESWMRelayServer -Server RelaySvr001 -Environment RESWM@svr-sql-001
-   Connecting to environment RESWM@svr-sql-001 on Relayserver RelaySvr001
+   Connects to environment RESWM@svr-sql-001 on Relayserver RelaySvr001
+.EXAMPLE
+   Connect-RESWMRelayServer -Server RelaySvr001 -ShareName RESCache$ -Credential CONTOSO\User001
+   Connects to the shared cache folder "\\RelaySvr001\RESCache$" as User001
 #>
 function Connect-RESWMRelayServer
 {
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName='Server')]
     [Alias('cwmr')]
     [OutputType()]
     Param
     (
         # Name of RES One Workspace RelayServer
-        [Parameter(ValueFromPipelineByPropertyName=$true,
+        [Parameter(Mandatory= $true,
+                   ValueFromPipelineByPropertyName=$true,
+                   ParameterSetName='Share',
+                   Position=0)]
+        [Parameter(Mandatory= $true,
+                   ValueFromPipelineByPropertyName=$true,
+                   ParameterSetName='Server',
                    Position=0)]
         [Alias('SamAccountName','Agent')]
         [string]
         $Server,
 
-        # Credential to connect to RelayServer.
+        # Name of the shared cache folder share (not the full UNC path)
+        [Parameter(Mandatory= $true,
+                   ParameterSetName='Share')]
+        [string]
+        $ShareName,
+
+        # Name of the RES WM environment. Required if there are more than one.
+        [Parameter(ParameterSetName='Server')]
+        [string]
+        $Environment,
+
+        # Credential to connect to RelayServer (share).
         [PSCredential]
         [System.Management.Automation.CredentialAttribute()]
         $Credential,
-
-        # Name of the RES WM environment. Required if there are more than one.
-        [string]
-        $Environment,
 
         # returns the path of the remote cache location.
         [switch]
@@ -371,98 +430,115 @@ function Connect-RESWMRelayServer
         {
             Write-Error "Computer [$Server] appears to be offline" -Category ConnectionError -ErrorAction Stop
         }
-        Try
+        If ($PSBoundParameters['ShareName'])
         {
-            $Params = @{
-                Class = "StdRegProv"
-                Namespace = 'root\default'
-                Computername = $Server
-                List = $true
-            }
-            If ($PSBoundParameters['Credential'])
-            {
-                $Params.Add('Credential',$Credential)
-            }
-            $Registry = Get-Wmiobject @Params
-            [uint32]$hklm = 2147483650   
-        }
-        catch
-        {
-            Write-Error "Unable to connect to registry" -Category ConnectionError -TargetObject $Server -ErrorAction Stop
-        }
-        Write-Verbose "Attempting to retreive cache folder on Relay Server $Server"
-        If (!($Environments = $Registry.EnumKey($hklm,"SOFTWARE\RES\Workspace Manager\RelayServer\Environments\").sNames))
-        {
-            $Environments = $Registry.EnumKey($hklm,"SOFTWARE\Wow6432Node\RES\Workspace Manager\RelayServer\Environments\").sNames
-            $x64 = '\Wow6432Node'
-        }
-        If ($Environments)
-        {
-            If (@($Environments).count -eq 1)
-            {
-                $Cache = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$Environments\Local",'CacheLocation').sValue
-                $StageID = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$Environments\Local",'StageId').sValue
-                $CacheLocation = $Cache.Replace(':','$') + "\$Environments\Cache\$StageID"
-            }
-            elseif ($PSBoundParameters['Environment'])
-            {
-                $Environments.ForEach({
-                    $EnvironmentName = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$_",'EnvironmentName').sValue
-                    If ($EnvironmentName -eq $PSBoundParameters['Environment'])
-                    {
-                        $Cache = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$_\Local",'CacheLocation').sValue
-                        $StageID = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$_\Local",'StageId').sValue
-                        $CacheLocation = $Cache.Replace(':','$') + "\$_\Cache\$StageID"
-                        continue
-                    }
-                })
-            }
-            else
-            {
-                $AllEnvironments = $Environments.ForEach({
-                    @{
-                        Path = "SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$_"
-                        Value = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$_",'EnvironmentName').sValue
-                    }
-                })
-                $Environment = Read-Host "Please specify which RES One Workspace environment to connect to ($($AllEnvironments.Value -join ','))"
-                If ($Environment)
-                {
-                    If ($ChosenEnv = $AllEnvironments.Where({$_.Value -eq $Environment}))
-                    {
-                        $Cache = $Registry.GetStringValue($hklm,"$($ChosenEnv.Path)\Local",'CacheLocation').sValue
-                        $StageID = $Registry.GetStringValue($hklm,"$($ChosenEnv.Path)\Local",'StageId').sValue
-                        $CacheLocation = $Cache.Replace(':','$') + "\$($ChosenEnv.Path.Split('\')[-1])\Cache\$StageID"
-                    }
-                    else
-                    {
-                        Write-Error "Environment [$Environment] not recognized. Should be one of the following: $($AllEnvironments.Value -join ',')" -Category ObjectNotFound -ErrorAction Stop
-                    }
-                }
-                else
-                {
-                    Write-Error "No enviroment to connect to." -Category NotSpecified -ErrorAction Stop
-                }
-            }
-            $WMCache = @{
-                Name = 'WMCache'
-                PSProvider = 'FileSystem'
-                Root = "\\$Server\$CacheLocation"
-            }
-            If ($PSBoundParameters['Credential'])
-            {
-                $WMCache.Add('Credential',$Credential)
-            }
-            Get-PSDrive -Name WMCache  -ErrorAction SilentlyContinue | Remove-PSDrive
-            $RESDrive = New-PSDrive @WMCache -Scope global -ErrorAction Stop
-            $global:AppMenus = @{}
-            (Select-Xml WMCache:\Objects\app_menus.xml -XPath '//objectinfo').Node.foreach({
-                $AppMenus.Add($_.guid,$_.config.applicationmenu.title)
-            })
+            Write-Verbose 'Using a share to connect to the cache.'
+            $Root = "\\$Server\$ShareName"
         }
         else
         {
-            Write-Error "No RelayServer environments found" -Category ObjectNotFound -TargetObject $Server -ErrorAction Stop
+            Write-Verbose "Connecting to registry on relayserver"
+            Try
+            {
+                $Params = @{
+                    Class = "StdRegProv"
+                    Namespace = 'root\default'
+                    Computername = $Server
+                    List = $true
+                }
+                If ($PSBoundParameters['Credential'])
+                {
+                    $Params.Add('Credential',$Credential)
+                }
+                $Registry = Get-Wmiobject @Params
+                [uint32]$hklm = 2147483650   
+            }
+            catch
+            {
+                Write-Error "Unable to connect to registry" -Category ConnectionError -TargetObject $Server -ErrorAction Stop
+            }
+            Write-Verbose "Attempting to retreive cache folder on relayerver $Server"
+            If (!($Environments = $Registry.EnumKey($hklm,"SOFTWARE\RES\Workspace Manager\RelayServer\Environments\").sNames))
+            {
+                $Environments = $Registry.EnumKey($hklm,"SOFTWARE\Wow6432Node\RES\Workspace Manager\RelayServer\Environments\").sNames
+                $x64 = '\Wow6432Node'
+            }
+            If ($Environments)
+            {
+                If (@($Environments).count -eq 1)
+                {
+                    $Cache = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$Environments\Local",'CacheLocation').sValue
+                    $CacheLocation = $Cache.Replace(':','$') + "\$Environments\Cache"
+                    $Root = "\\$Server\$CacheLocation"
+                }
+                elseif ($PSBoundParameters['Environment'])
+                {
+                    $Environments.ForEach({
+                        $EnvironmentName = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$_",'EnvironmentName').sValue
+                        If ($EnvironmentName -eq $PSBoundParameters['Environment'])
+                        {
+                            $Cache = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$_\Local",'CacheLocation').sValue
+                            $CacheLocation = $Cache.Replace(':','$') + "\$_\Cache"
+                            $Root = "\\$Server\$CacheLocation"
+                            continue
+                        }
+                    })
+                }
+                else
+                {
+                    $AllEnvironments = $Environments.ForEach({
+                        @{
+                            Path = "SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$_"
+                            Value = $Registry.GetStringValue($hklm,"SOFTWARE$x64\RES\Workspace Manager\RelayServer\Environments\$_",'EnvironmentName').sValue
+                        }
+                    })
+                    $Environment = Read-Host "Please specify which RES One Workspace environment to connect to ($($AllEnvironments.Value -join ','))"
+                    If ($Environment)
+                    {
+                        If ($ChosenEnv = $AllEnvironments.Where({$_.Value -eq $Environment}))
+                        {
+                            $Cache = $Registry.GetStringValue($hklm,"$($ChosenEnv.Path)\Local",'CacheLocation').sValue
+                            $CacheLocation = $Cache.Replace(':','$') + "\$($ChosenEnv.Path.Split('\')[-1])\Cache"
+                            $Root = "\\$Server\$CacheLocation"
+                        }
+                        else
+                        {
+                            Write-Error "Environment [$Environment] not recognized. Should be one of the following: $($AllEnvironments.Value -join ',')" -Category ObjectNotFound -ErrorAction Stop
+                        }
+                    }
+                    else
+                    {
+                        Write-Error "No environment to connect to." -Category NotSpecified -ErrorAction Stop
+                    }
+                }
+            }
+            else
+            {
+                Write-Error "No RelayServer environments found" -Category ObjectNotFound -TargetObject $Server -ErrorAction Stop
+            }
+        }
+        Write-Verbose "Creating PSDrive for path [$Root]"
+        $WMCache = @{
+            Name = 'WMCache'
+            PSProvider = 'FileSystem'
+            Root = $Root
+        }
+        If ($PSBoundParameters['Credential'])
+        {
+            Write-Verbose 'Using alternate credentials'
+            $WMCache.Add('Credential',$Credential)
+        }
+        Get-PSDrive -Name WMCache  -ErrorAction SilentlyContinue | Remove-PSDrive
+        $RESDrive = New-PSDrive @WMCache -Scope global -ErrorAction Stop
+        $global:AppMenus = @{}
+        $SubFolder = Get-ChildItem WMCache: | sort LastWriteTime | select -Last 1 -ExpandProperty Name
+        (Select-Xml WMCache:\$SubFolder\Objects\app_menus.xml -XPath '//objectinfo').Node.foreach({
+            $AppMenus.Add($_.guid,$_.config.applicationmenu.title)
+        })
+        If ((Select-Xml WMCache:\$SubFolder\Objects\respf_agents.xml -XPath '//connection_method').Node.InnerText -eq 'relayserver')
+        {
+            $global:RelayServers = (Select-Xml WMCache:\$SubFolder\Objects\respf_agents.xml -XPath '//relay_server').Node.InnerText.foreach({
+            $_.split(':')[0]})
         }
         If ($PSBoundParameters['PassThru'])
         {
@@ -513,6 +589,7 @@ function Get-RESWMApplication
         [string]
         $Title,
 
+        # ID of the application
         [Parameter(ParameterSetName='AppID',
                    Position=0)]
         [int]
@@ -545,7 +622,7 @@ function Get-RESWMApplication
 
     $Params = @{
         Source = 'Objects\apps.xml'
-        Node = 'application'
+        Type = 'application'
     }
     If ($PSBoundParameters['Title'])
     {
@@ -608,7 +685,7 @@ function Get-RESWMStartMenu
 
     $Params = @{
         Source = 'Objects\app_menus.xml'
-        Node = 'applicationmenu'
+        Type = 'applicationmenu'
     }
     If ($PSBoundParameters['Title'])
     {
@@ -665,7 +742,7 @@ function Get-RESWMSecurityRole
 
     $Params = @{
         Source = 'Objects\sec_role.xml'
-        Node = 'securityrole'
+        Type = 'securityrole'
     }
     If ($PSBoundParameters['Name'])
     {
@@ -718,7 +795,7 @@ function Get-RESWMMapping
 
     $Params = @{
         Source = 'Objects\pl_map.xml'
-        Node = 'mapping'
+        Type = 'mapping'
     }
     If ($PSBoundParameters['DriveLetter'])
     {
@@ -727,6 +804,12 @@ function Get-RESWMMapping
     elseif ($PSBoundParameters['User'])
     {
         $Params.Add('User',$User)
+        If (!$RESUserApps)
+        {
+            $RESUserApps = Get-RESWMApplication -User $User
+        }
+        return [RESWMMapping[]](Get-RESWMObject @Params) | 
+            where ParentGUID -In ($RESUserApps.GUID + [guid]::Empty)
     }
     [RESWMMapping[]](Get-RESWMObject @Params)
 }
@@ -753,7 +836,7 @@ function Get-RESWMRegistry
 {
     [CmdletBinding(DefaultParameterSetName='Name')]
     [Alias('gwmr')]
-    [OutputType()]
+    [OutputType([RESWMRegistry])]
     Param
     (
         # Name of the security role
@@ -787,7 +870,7 @@ function Get-RESWMRegistry
     {
         $Params = @{
             Source = 'Objects\pl_reg.xml'
-            Node = 'registry'
+            Type = 'registry'
         }
         If ($PSBoundParameters['Name'])
         {
@@ -804,6 +887,12 @@ function Get-RESWMRegistry
         elseif ($PSBoundParameters['User'])
         {
             $Params.Add('User',$User)
+            If (!$RESUserApps)
+            {
+                $RESUserApps = Get-RESWMApplication -User $User
+            }
+            return [RESWMRegistry[]](Get-RESWMObject @Params) | 
+                where ParentGUID -In ($RESUserApps.GUID + [guid]::Empty)
         }
         [RESWMRegistry[]](Get-RESWMObject @Params)
     }
@@ -842,7 +931,7 @@ function Get-RESWMZone
 
     $Params = @{
         Source = 'Objects\pwrzone.xml'
-        Node = 'powerzone'
+        Type = 'powerzone'
     }
     If ($PSBoundParameters['Name'])
     {
@@ -897,7 +986,7 @@ function Get-RESWMUserPreference
     {
         $Params = @{
             Source = 'Objects\user_prefs.xml'
-            Node = 'profile'
+            Type = 'profile'
         }
         If ($PSBoundParameters['Name'])
         {
@@ -968,7 +1057,7 @@ function Get-RESWMPrinter
 
     $Params = @{
         Source = 'Objects\pl_prn.xml'
-        Node = 'printermapping'
+        Type = 'printermapping'
     }
     If ($PSBoundParameters['Name'])
     {
@@ -982,7 +1071,81 @@ function Get-RESWMPrinter
     {
         $Params.Add('Filter',"config/printermapping/driver = '$Driver'")
     }
+    elseif ($PSBoundParameters['User'])
+    {
+        $Params.Add('User',$User)
+        If (!$RESUserApps)
+        {
+            $RESUserApps = Get-RESWMApplication -User $User
+        }
+        return ([RESWMPrinter[]](Get-RESWMObject @Params) | 
+            where ParentGUID -In ($RESUserApps.GUID + [guid]::Empty))
+    }
     [RESWMPrinter[]](Get-RESWMObject @Params)
+}
+
+<#
+.Synopsis
+   Get RES ONE Workspace printer
+.DESCRIPTION
+   Get RES ONE Workspace printer
+.EXAMPLE
+   Get-RESWMPrinter -Printer *\PRT-001
+   Get RES WM printer named PRT-001
+.EXAMPLE
+   Get-RESWMPrinter -Printer \\SRV-PRT-001\*
+   Get RES WM printers on printserver SRV-PRT-001
+.EXAMPLE
+   Get-RESWMPrinter -Driver Lexmark*
+   Get RES WM printer with a Lexmark driver
+.EXAMPLE
+   Get-RESWMPrinter -User CONTOSO\User001
+   Get RES WM printer(s) for User001
+#>
+function Get-RESWMVariable
+{
+    [CmdletBinding(DefaultParameterSetName='Name')]
+    [Alias('gwmv')]
+    [OutputType([RESWMPrinter])]
+    Param
+    (
+        # Path and name of the printer
+        [Parameter(ParameterSetName='Name',
+                   Position=0)]
+        [SupportsWildcards()]
+        [string]
+        $Name,
+
+        # GUID of the PowerZone
+        [Parameter(ParameterSetName='GUID',
+                   Position=0)]
+        [guid]
+        $GUID,
+
+        # User that has access
+        [Parameter(ParameterSetName='User',
+                   Position=0)]
+        [RESWMUser]
+        $User
+    )
+
+    $Params = @{
+        Source = 'Objects\pl_var.xml'
+        Type = 'Variable'
+    }
+    If ($PSBoundParameters['Name'])
+    {
+        $Params.Add('Filter',"config/variable/name = '$Name'")
+    }
+    elseif ($PSBoundParameters['GUID'])
+    {
+        $Params.Add('Filter',"guid = '{$GUID}'")
+    }
+    elseif ($PSBoundParameters['User'])
+    {
+        $Params.Add('User',$User)
+    }
+    (Get-RESWMObject @Params)
 }
 
 <#
@@ -1065,6 +1228,102 @@ function Update-RESWMAgentCache
 
 <#
 .Synopsis
+   Get user preference files for a single user
+.DESCRIPTION
+   Get user preference files for a single user
+.EXAMPLE
+   Get-RESWMUserPreferenceFiles -UserPreference 'Office 2016' -User CONTOSO\User1234 -ZeroProfilePath O:\pwrmenu
+   Get user preference files named 'Office 2016' for user CONTOSO\User1234 on O:\pwrmenu
+.EXAMPLE
+   Get-RESWMApplication -AppID 104 | Get-RESWMUserPreference | Get-RESWMUserPreferenceFiles -User CONTOSO\User1234
+   Get all user preference files on application with Id 104 for user CONTOSO\User1234 and let powershell figure out the Zero Profile path
+#>
+function Get-RESWMUserPreferenceFiles
+{
+    [CmdletBinding(SupportsShouldProcess=$true)]
+    [Alias('rwmupf')]
+    Param
+    (
+        # RES ONE Workspace application
+        [Parameter(Mandatory=$true,
+                   ValueFromPipeline=$true,
+                   Position=0)]
+        [RESWMUserPref]
+        $UserPreference,
+
+        # User for whom the cache will be reset
+        [Parameter(Mandatory=$true,
+                   Position=1)]
+        [RESWMUser]
+        $User,
+
+        # Path to the users RES profiles
+        [Parameter(Mandatory=$false,
+                   Position=2)]
+        [string]
+        $ZeroProfilePath
+    )
+
+    Begin
+    {
+        Test-CacheConnection
+        Write-Verbose 'Determining path to users user preferences...'
+        If (!$PSBoundParameters['ZeroProfilePath'])
+        {
+            $Drive = (Select-Xml -Path WMCache:\settings.xml -XPath "//setting[name = 'DriveUserSettings']").Node.value
+            $ZeroProfilePath = "$Drive`:" + (Select-Xml -Path WMCache:\settings.xml -XPath "//setting[name = 'LocationUserSettings']").Node.value
+        }
+        If ($ZeroProfilePath.StartsWith('\\'))
+        {
+            $Root = $ZeroProfilePath.replace('%USERNAME%',$User.Name)
+        }
+        else
+        {
+            If ($Drive = Get-RESWMMapping -User $User | where Device -EQ "$($ZeroProfilePath.Substring(0,1)):")
+            {        
+                $ShareName = $Drive.ShareName.replace('%USERNAME%',$User.Name)
+                $Root = "$ShareName\$(Split-Path $ZeroProfilePath -Leaf)"
+            }
+            else
+            {
+                Write-Error -Message "Unable to find drive mapping [$($ZeroProfilePath.Substring(0,1)):] for this user" -Category ObjectNotFound -ErrorAction Stop
+            }
+        }
+        Write-Verbose "Path to user preference files is [$Root\UserPref]"
+        If ($UserPref = Get-Item $Root\UserPref -ErrorAction SilentlyContinue)
+        {
+            Write-Verbose "Using default credentials to get the files"
+        }
+        elseif ((Get-PSDrive WMCache).Credential.UserName)
+        {
+            Write-Verbose "Creating a temporary PSDrive to the share"
+            $ZeroProf = New-PSDrive -Name ZeroProf -PSProvider FileSystem -Root $Root -Credential (Get-PSDrive WMCache).Credential -ErrorAction Stop
+            $UserPref = Get-Item ZeroProf:\UserPref -ErrorAction Stop
+        }
+    }
+    Process
+    {
+        If ($Files = Get-Item "$UserPref\{$($UserPreference.GUID)}.*" -ErrorAction SilentlyContinue)
+        {
+            return $Files
+        }
+        else
+        {
+            Write-Error "No user preferences found for this user." -Category ObjectNotFound -TargetObject $UserPref
+        }
+    }
+    End
+    {
+        If ($ZeroProf)
+        {
+            Write-Verbose 'Removing PSDrive'
+            $ZeroProf | Remove-PSDrive
+        }
+    }
+}
+
+<#
+.Synopsis
    Reset user preferences for a single user
 .DESCRIPTION
    Reset a user preference for a single user by moving the corresponding 
@@ -1073,8 +1332,8 @@ function Update-RESWMAgentCache
    Reset-RESWMUserPreference -UserPreference 'Office 2016' -User CONTOSO\User1234 -ZeroProfilePath O:\pwrmenu
    Reset user preference named 'Office 2016' for user CONTOSO\User1234 on O:\pwrmenu
 .EXAMPLE
-   Get-RESWMApplication -AppID 104 | Get-RESWMUserPreference | Reset-RESWMUserPreference -User CONTOSO\User1234 -ZeroProfilePath \\SVR-FILE-001\%USERNAME%$\pwrmenu
-   Reset all user preference object on application with Id 104
+   Get-RESWMApplication -AppID 104 | Get-RESWMUserPreference | Reset-RESWMUserPreference -User CONTOSO\User1234
+   Reset all user preference object on application with Id 104 and let powershell figure out the Zero Profile path
 #>
 function Reset-RESWMUserPreference
 {
@@ -1108,11 +1367,13 @@ function Reset-RESWMUserPreference
 
     Begin
     {
+        Test-CacheConnection
         Write-Verbose 'Determining path to users user preferences...'
         If (!$PSBoundParameters['ZeroProfilePath'])
         {
-            $Drive = (Select-Xml -Path WMCache:\settings.xml -XPath "//setting[name = 'DriveUserSettings']").Node.value
-            $ZeroProfilePath = "$Drive`:" + (Select-Xml -Path WMCache:\settings.xml -XPath "//setting[name = 'LocationUserSettings']").Node.value
+            $SubFolder = Get-ChildItem WMCache: | sort LastWriteTime | select -Last 1 -ExpandProperty Name
+            $Drive = (Select-Xml -Path WMCache:\$SubFolder\settings.xml -XPath "//setting[name = 'DriveUserSettings']").Node.value
+            $ZeroProfilePath = "$Drive`:" + (Select-Xml -Path WMCache:\$SubFolder\settings.xml -XPath "//setting[name = 'LocationUserSettings']").Node.value
         }
         If ($ZeroProfilePath.StartsWith('\\'))
         {
