@@ -5,18 +5,18 @@ Using namespace  System.Xml
 # Application
 class RESWMApplication
 {
-    [int]        $AppID
-    [string]     $Title
-    [string]     $Description
-    [string]     $Path
-    [bool]       $Enabled
-    [string]     $CommandLine
-    [string]     $Parameters
+    [int]          $AppID
+    [string]       $Title
+    [string]       $Description
+    [string]       $Path
+    [bool]         $Enabled
+    [string]       $CommandLine
+    [string]       $Parameters
     [RESWMAccCtrl] $AccessControl
-    [string]     $Type
-    [XmlElement] $FullObject
-    hidden [guid] $GUID
-    hidden [guid] $ParentGUID
+    [string]       $Type
+    [XmlElement]   $FullObject
+    hidden [guid]  $GUID
+    hidden [guid]  $ParentGUID
 
     RESWMApplication ([string] $Title)
     {
@@ -228,11 +228,24 @@ class RESWMUser
         $this.Name = $Account.Properties.name[0]
         $this.DistinguishedName = $Account.Properties.distinguishedname[0]
         $this.Domain = $DomainName
-        $this.MemberOf = $Account.Properties.memberof.TrimStart('CN=').foreach({
-            $GroupName = $_.Split(',')[0]
-            $DomainName = $_.Split(',').where({$_ -like 'DC=*'})[0].TrimStart('DC=')
-            "$DomainName\$GroupName"
+        $MemberShip = New-Object System.Collections.ArrayList
+        $Groups = [adsisearcher]"(&(objectCategory=group)(member:1.2.840.113556.1.4.1941:=$($this.DistinguishedName)))"
+        $Groups.FindAll().ForEach({
+            $GroupName = $_.Properties.samaccountname[0]
+            $Domain = $_.Properties.distinguishedname.Split(',').where({$_ -like 'DC=*'})[0].TrimStart('DC=')
+            $null = $MemberShip.Add("$Domain\$GroupName")
         })
+        If ($MemberShip -notcontains "$DomainName\Domain Users")
+        {
+            $null = $MemberShip.Add("$DomainName\Domain Users")
+            $DomainUsers = ([adsisearcher]"(&(objectCategory=group)(cn=Domain Users))").FindAll().Properties.distinguishedname
+            ([adsisearcher]"(&(objectCategory=group)(member:1.2.840.113556.1.4.1941:=$DomainUsers))").FindAll().ForEach({
+                $GroupName = $_.Properties.samaccountname[0]
+                $Domain = $_.Properties.distinguishedname.Split(',').where({$_ -like 'DC=*'})[0].TrimStart('DC=')
+                $null = $MemberShip.Add("$Domain\$GroupName")
+            })
+        }
+        $this.MemberOf = $MemberShip
         $this.SID = New-Object System.Security.Principal.SecurityIdentifier($Account.Properties.objectsid[0],0)
         $OU = $this.DistinguishedName.Split(',')[1..($this.DistinguishedName.Split(',').count - 1)] -join ','
         $ADOU = [adsi]"LDAP://$ADDomain/$OU"
@@ -245,15 +258,32 @@ class RESWMUser
         $ADDomain = $forest.Domains | where Name -Like "$Domain.*"
         $ADSearcher = [adsisearcher]::new($ADDomain.GetDirectoryEntry(),"(&(objectClass=user)(SamAccountName=$UserName))")
         $ADSearcher.PropertiesToLoad.AddRange(@('name','distinguishedname','objectClass','memberof'))
-        $User = $ADSearcher.FindAll()
-        $this.Name = $User.Properties.name[0]
-        $this.DistinguishedName = $User.Properties.distinguishedname[0]
+        $Account = $ADSearcher.FindAll()
+        $this.Name = $Account.Properties.name[0]
+        $this.DistinguishedName = $Account.Properties.distinguishedname[0]
         $this.Domain = $Domain
-        $this.MemberOf = $User.Properties.memberof.TrimStart('CN=').foreach({
-            $GroupName = $_.Split(',')[0]
-            $DomainName = $_.Split(',').where({$_ -like 'DC=*'})[0].TrimStart('DC=')
-            "$DomainName\$GroupName"
+        $MemberShip = New-Object System.Collections.ArrayList
+        $Groups = [adsisearcher]"(&(objectCategory=group)(member:1.2.840.113556.1.4.1941:=$($this.DistinguishedName)))"
+        $Groups.FindAll().ForEach({
+            $GroupName = $_.Properties.samaccountname[0]
+            $DomainName = $_.Properties.distinguishedname.Split(',').where({$_ -like 'DC=*'})[0].TrimStart('DC=')
+            $null = $MemberShip.Add("$DomainName\$GroupName")
         })
+        If ($MemberShip -notcontains "$Domain\Domain Users")
+        {
+            $null = $MemberShip.Add("$Domain\Domain Users")
+            $DomainUsers = ([adsisearcher]"(&(objectCategory=group)(cn=Domain Users))").FindAll().Properties.distinguishedname
+            ([adsisearcher]"(&(objectCategory=group)(member:1.2.840.113556.1.4.1941:=$DomainUsers))").FindAll().ForEach({
+                $GroupName = $_.Properties.samaccountname[0]
+                $DomainName = $_.Properties.distinguishedname.Split(',').where({$_ -like 'DC=*'})[0].TrimStart('DC=')
+                $null = $MemberShip.Add("$DomainName\$GroupName")
+            })
+        }
+        $this.MemberOf = $MemberShip
+        $this.SID = New-Object System.Security.Principal.SecurityIdentifier($Account.Properties.objectsid[0],0)
+        $OU = $this.DistinguishedName.Split(',')[1..($this.DistinguishedName.Split(',').count - 1)] -join ','
+        $ADOU = [adsi]"LDAP://$ADDomain/$OU"
+        $this.ParentOU = $ADOU.properties.objectguid[0].ForEach({$_.ToString('x2')}) -join ''
     }
 
     [string] ToString()
@@ -286,8 +316,8 @@ class RESWMAccCtrl
 
     [string] ToString()
     {
-        $Group = $this.Access | where type -ne 'powerzone'
-        $Zone = $this.Access | where type -eq 'powerzone'
+        $Group = $this.Access | where type -NotMatch 'powerzone|clientname'
+        $Zone = $this.Access | where type -Match 'powerzone|clientname'
         $AllGroups = $Group.ForEach({$_.ToString()}) -join " $($this.AccessMode.ToLower()) "
         $AllZones = $Zone.ForEach({$_.ToString()}) -join " $($this.ZoneMode.ToLower()) "
         If ($AllZones)
@@ -320,6 +350,7 @@ class RESWMAccess
             notinpowerzone {$this.Object = Get-RESWMZone -GUID $XMLNode.object}
             S              {$this.Object = [RESWMOU[]]$XMLNode;$this.Type = 'OU'}
             orchestra      {$this.Object = $XMLNode.services} # NOT IN ENVIRONMENT!!!!
+            clientname     {$this.Object = If ($XMLNode.object){$XMLNode.object}else{$XMLNode.InnerText}}
             default        {$this.Object = $XMLNode.InnerText}
         }
         $this.SID = $XMLNode.sid
@@ -373,6 +404,7 @@ class RESWMAccess
             OU             {$String = "OU: [$($this.Object)]"}
             orchestra      {$String = "RESID: [$this.Object]"}
             delegated      {$String = "Delegated: [$($this.Object)]"}
+            clientname     {$String = "Client: [$($this.Object)]"}
             default        {$String = "[$($this.Object)]"}
         }
         return $String
@@ -504,22 +536,22 @@ class RESWMUserPref
 
 class RESWMRegistry
 {
+    [int]          $Order
     [string]       $Name
     [string]       $Description
     [RESWMAccCtrl] $AccessControl
     [bool]         $Enabled
     [string]       $Type
-    #[Registry[]]   $Registry
-    [string[]]   $Registry
     [string]       $Location
+    [Registry[]]   $Registry
     [string]       $State
     [string]       $ObjectDesc
-    [int]          $Order
     [bool]         $Runonce
     [string]       $RunonceFile
     hidden [guid]  $ParentGuid
     hidden [guid]  $GUID
     hidden [guid]  $UpdateGuid
+    hidden [string]$File
 
     RESWMRegistry ([XmlElement] $XMLNode)
     {
@@ -534,6 +566,7 @@ class RESWMRegistry
         }
         $this.Enabled = $XMLNode.recordenabled -eq 'yes'
         $this.GUID = $XMLNode.guid
+        $this.Order = $XMLNode.order
         $this.ParentGUID = $XMLNode.parentguid
         $this.UpdateGUID = $XMLNode.updateGUID
         switch ($this.ParentGuid.ToString())
@@ -541,8 +574,23 @@ class RESWMRegistry
             00000000-0000-0000-0000-000000000000 {$this.Location = 'Global'}
             default {$this.Location = 'Application'}
         }
-        #$this.Registry = Get-WMREGFile "WMCache:\Resources\pl_reg\{$($this.GUID)}.reg"
-        $this.Registry = $XMLNode.config.registry.registryfile
+        $this.File = $XMLNode.config.registry.registryfile
+        $this.Registry = Get-WMREGFile $this.File
+        If (!$this.State)
+        {
+            $this.State = 'Both'
+        }
+    }
+
+    # Show content of the Registry file
+    [string[]] GetRegfileContent()
+    {
+        return (Get-WMREGFile $this.File -ShowContent)
+    }
+
+    [System.IO.FileInfo] SaveRegfile ([string]$Path)
+    {
+        return (Get-WMREGFile $this.File -SaveFile $Path)
     }
 }
 
@@ -563,7 +611,7 @@ class Registry
         $this.Description = $Description
     }
 
-    [string] ToString ()
+    [string] ToString()
     {
         return $this.Value
     }
