@@ -1,7 +1,3 @@
-#Requires -Version 5
-
-. "$PSScriptRoot\RESWM-Classes.ps1"
-
 #region helper functions
 
 <#
