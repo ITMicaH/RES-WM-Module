@@ -1,3 +1,7 @@
+#Requires -Version 5
+
+. "$PSScriptRoot\RESWM-Classes.ps1"
+
 #region helper functions
 
 <#
@@ -16,8 +20,7 @@ function Test-CacheConnection
             Write-Verbose "Checking cache connection to relayserver..."
             foreach ($Time in (1..4))
             {
-                $Ping = Get-WmiObject -Class Win32_PingStatus -Filter "(Address='$RelayServer') and timeout=1000" -Property StatusCode
-                If ($Ping.StatusCode -eq 0)
+                If ([System.Net.Sockets.TcpClient]::new($Server, 445).Connected)
                 {
                     If (!(Test-Path wmcache:\))
                     {
@@ -45,7 +48,8 @@ function Test-CacheConnection
                 foreach ($RelayServer in $RelayServers.where({$_ -ne $Server}))
                 {
                     Write-Verbose "Attempting to connect to relayserver $RelayServer..."
-                    If (Test-Connection $RelayServer -Count 1 -Quiet)
+                    $Ping = Get-WmiObject -Class Win32_PingStatus -Filter "(Address='$RelayServer') and timeout=1000" -Property StatusCode
+                    If ($Ping.StatusCode -eq 0)
                     {
                         $Params = @{
                             Server = $RelayServer
@@ -119,7 +123,7 @@ function Get-RESWMObject
     $FullFilter = ''
     If ($PSBoundParameters['Filter'])
     {
-        $Filters = $Filter -split '\b(and|or)'
+        $Filters = $Filter -split '\b(and|or)\b'
         $FullFilterArray = New-Object System.Collections.ArrayList
         Foreach ($Filter in $Filters)
         {
@@ -423,8 +427,7 @@ function Connect-RESWMRelayServer
     Process
     {
         $Server = [System.Net.Dns]::GetHostByName($Server).HostName # FQDN
-        $SMBTest = [System.Net.Sockets.TcpClient]::new($Server, 445)
-        If (!$SMBTest.Connected)
+        If (![System.Net.Sockets.TcpClient]::new($Server, 445).Connected)
         {
             Write-Error "Computer [$Server] appears to be offline" -Category ConnectionError -ErrorAction Stop
         }
@@ -1084,27 +1087,21 @@ function Get-RESWMPrinter
 
 <#
 .Synopsis
-   Get RES ONE Workspace printer
+   Get RES ONE Workspace environment variable
 .DESCRIPTION
-   Get RES ONE Workspace printer
+   Get RES ONE Workspace environment variable
 .EXAMPLE
-   Get-RESWMPrinter -Printer *\PRT-001
-   Get RES WM printer named PRT-001
+   Get-RESWMVariable -Name DESKPIC
+   Get RES WM variable named DESKPIC
 .EXAMPLE
-   Get-RESWMPrinter -Printer \\SRV-PRT-001\*
-   Get RES WM printers on printserver SRV-PRT-001
-.EXAMPLE
-   Get-RESWMPrinter -Driver Lexmark*
-   Get RES WM printer with a Lexmark driver
-.EXAMPLE
-   Get-RESWMPrinter -User CONTOSO\User001
-   Get RES WM printer(s) for User001
+   Get-RESWMVariable -User CONTOSO\User001
+   Get RES WM variables for User001
 #>
 function Get-RESWMVariable
 {
     [CmdletBinding(DefaultParameterSetName='Name')]
     [Alias('gwmv')]
-    [OutputType([RESWMPrinter])]
+    [OutputType([RESWMVariable])]
     Param
     (
         # Path and name of the printer
@@ -1142,9 +1139,87 @@ function Get-RESWMVariable
     elseif ($PSBoundParameters['User'])
     {
         $Params.Add('User',$User)
+        If (!$RESUserApps)
+        {
+            $RESUserApps = Get-RESWMApplication -User $User
+        }
+        return ([RESWMVariable[]](Get-RESWMObject @Params) | 
+            where ParentGUID -In ($RESUserApps.GUID + [guid]::Empty))
+    }
+    [RESWMVariable[]](Get-RESWMObject @Params)
+}
+
+<#
+.Synopsis
+   Get RES ONE Workspace task
+.DESCRIPTION
+   Get RES ONE Workspace task
+.EXAMPLE
+   Get-RESWMPrinter -Printer *\PRT-001
+   Get RES WM printer named PRT-001
+.EXAMPLE
+   Get-RESWMPrinter -Printer \\SRV-PRT-001\*
+   Get RES WM printers on printserver SRV-PRT-001
+.EXAMPLE
+   Get-RESWMPrinter -Driver Lexmark*
+   Get RES WM printer with a Lexmark driver
+.EXAMPLE
+   Get-RESWMPrinter -User CONTOSO\User001
+   Get RES WM printer(s) for User001
+#>
+function Get-RESWMTask
+{
+    [CmdletBinding(DefaultParameterSetName='Description')]
+    [Alias('gwmt')]
+    [OutputType([RESWMVariable])]
+    Param
+    (
+        # Path and name of the printer
+        [Parameter(ParameterSetName='Description',
+                   Position=0)]
+        [SupportsWildcards()]
+        [string]
+        $Description,
+
+        # GUID of the PowerZone
+        [Parameter(ParameterSetName='GUID',
+                   Position=0)]
+        [guid]
+        $GUID,
+
+        # User that has access
+        [Parameter(ParameterSetName='User',
+                   Position=0)]
+        [RESWMUser]
+        $User
+    )
+
+    $Params = @{
+        Source = 'Objects\pl_task.xml'
+        Type = 'exttask'
+    }
+    If ($PSBoundParameters['Name'])
+    {
+        $Params.Add('Filter',"config/exttask/description = '$Description'")
+    }
+    elseif ($PSBoundParameters['GUID'])
+    {
+        $Params.Add('Filter',"guid = '{$GUID}'")
+    }
+    elseif ($PSBoundParameters['User'])
+    {
+        $Params.Add('User',$User)
+        If (!$RESUserApps)
+        {
+            $RESUserApps = Get-RESWMApplication -User $User
+        }
+        return ([RESWMVariable[]](Get-RESWMObject @Params) | 
+            where ParentGUID -In ($RESUserApps.GUID + [guid]::Empty))
     }
     (Get-RESWMObject @Params)
 }
+
+
 
 <#
 .Synopsis
@@ -1179,39 +1254,50 @@ function Update-RESWMAgentCache
     {
         $null = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
             $WMService = 'RES'
-            switch ($env:PROCESSOR_ARCHITECTURE) {
-                x86   {$RegPath = "HKLM:\SOFTWARE\RES\Workspace Manager"}
-                AMD64 {$RegPath = "HKLM:\SOFTWARE\WOW6432Node\RES\Workspace Manager"}
+            If ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64') {
+                $path = 'HKLM:\SOFTWARE\WOW6432Node\RES\Workspace Manager'
             }
-            $null = Test-Path $RegPath -ErrorAction Stop
+            else {
+                $path = 'HKLM:\SOFTWARE\RES\Workspace Manager'
+            }
+            $Properties = Get-ItemProperty -Path $path
+            if ($Properties.LocalCacheOnDisk -eq 'yes')
+            {
+                # Remove the Global guid from xml
+                [xml]$Xml = Get-Content "$($Properties.LocalCachePath)\UpdateGuids.xml"
+                $Xml.updateguids.Global = ''
+                $Xml.Save("$($Properties.LocalCachePath)\UpdateGuids.xml")
+            }
+            else
+            {
+                $null = Test-Path $path -ErrorAction Stop
+                # Remove the Global guid registry value to trigger a cache update
+                Remove-Itemproperty -path $path\UpdateGUIDs -name Global
+            }
             $Start = Get-Date
-            $GlobalGUID = Get-ItemProperty -Path $RegPath\UpdateGUIDs -Name Global
-            If ($GlobalGUID.Global)
-            {
-                Set-ItemProperty -Path $RegPath\UpdateGUIDs -Name Global -Value $null
-            }
             Restart-Service $WMService
-            Do
+            # Wait until the Global key has been recreated
+            $result = $null
+            $i = 0
+            Do 
             {
-                $GlobalGUID = Get-ItemProperty -Path $RegPath\UpdateGUIDs -Name Global
-                If ($GlobalGUID.Global)
+                if ($Properties.LocalCacheOnDisk -eq 'yes')
                 {
-                    $Time = (Get-Date) - $Start
-                    $Output = [pscustomobject]@{
-                        Success = $true
-                        Time = $Time
-                    }
-                    return $Output
+                    [xml]$Xml = Get-Content "$($Properties.LocalCachePath)\UpdateGuids.xml"
+                    $result = $Xml.updateguids.Global -ne ''
                 }
                 else
                 {
-                    $Time = (Get-Date) - $Start
-                    sleep -Seconds 1
+                    $global = Get-Itemproperty -path $path\UpdateGUIDs -name Global -ErrorAction SilentlyContinue
+                    $result = $global -ne $null
                 }
-            }
-            Until ($Time.Minutes -eq 5)
+                Sleep -Milliseconds 500
+                $Time = (Get-Date) - $Start
+                $i++
+            } 
+            Until ($result -or ($Time.Minutes -ge 5))
             $Output = [pscustomobject]@{
-                Success = $false
+                Success = $result
                 Time = $Time
             }
             return $Output
@@ -1239,11 +1325,11 @@ function Update-RESWMAgentCache
 function Get-RESWMUserPreferenceFiles
 {
     [CmdletBinding(SupportsShouldProcess=$true)]
-    [Alias('rwmupf')]
+    [Alias('gwmupf')]
     Param
     (
         # RES ONE Workspace application
-        [Parameter(Mandatory=$true,
+        [Parameter(Mandatory=$false,
                    ValueFromPipeline=$true,
                    Position=0)]
         [RESWMUserPref]
@@ -1268,8 +1354,9 @@ function Get-RESWMUserPreferenceFiles
         Write-Verbose 'Determining path to users user preferences...'
         If (!$PSBoundParameters['ZeroProfilePath'])
         {
-            $Drive = (Select-Xml -Path WMCache:\settings.xml -XPath "//setting[name = 'DriveUserSettings']").Node.value
-            $ZeroProfilePath = "$Drive`:" + (Select-Xml -Path WMCache:\settings.xml -XPath "//setting[name = 'LocationUserSettings']").Node.value
+            $SubFolder = Get-ChildItem WMCache: | sort LastWriteTime | select -Last 1 -ExpandProperty Name
+            $Drive = (Select-Xml -Path WMCache:\$SubFolder\settings.xml -XPath "//setting[name = 'DriveUserSettings']").Node.value
+            $ZeroProfilePath = "$Drive`:" + (Select-Xml -Path WMCache:\$SubFolder\settings.xml -XPath "//setting[name = 'LocationUserSettings']").Node.value
         }
         If ($ZeroProfilePath.StartsWith('\\'))
         {
@@ -1301,7 +1388,12 @@ function Get-RESWMUserPreferenceFiles
     }
     Process
     {
-        If ($Files = Get-Item "$UserPref\{$($UserPreference.GUID)}.*" -ErrorAction SilentlyContinue)
+        If ($PSBoundParameters['UserPreference'])
+        {
+            $Files = Get-Item "$UserPref\{$($UserPreference.GUID)}.*" -ErrorAction Stop
+            return $Files
+        }
+        elseif ($Files = Get-ChildItem $UserPref -ErrorAction Stop)
         {
             return $Files
         }
