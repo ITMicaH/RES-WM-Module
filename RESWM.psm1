@@ -423,7 +423,8 @@ function Connect-RESWMRelayServer
     Process
     {
         $Server = [System.Net.Dns]::GetHostByName($Server).HostName # FQDN
-        If (!(Test-Connection -ComputerName $Server -Count 1 -Quiet))
+        $SMBTest = [System.Net.Sockets.TcpClient]::new($Server, 445)
+        If (!$SMBTest.Connected)
         {
             Write-Error "Computer [$Server] appears to be offline" -Category ConnectionError -ErrorAction Stop
         }
