@@ -16,7 +16,8 @@ function Test-CacheConnection
             Write-Verbose "Checking cache connection to relayserver..."
             foreach ($Time in (1..4))
             {
-                If (Test-Connection $Server -Count 1 -Quiet)
+                $Ping = Get-WmiObject -Class Win32_PingStatus -Filter "(Address='$RelayServer') and timeout=1000" -Property StatusCode
+                If ($Ping.StatusCode -eq 0)
                 {
                     If (!(Test-Path wmcache:\))
                     {
