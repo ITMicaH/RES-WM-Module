@@ -2,178 +2,6 @@
 
 Using namespace  System.Xml
 
-# Application
-class RESWMApplication
-{
-    [int]          $AppID
-    [string]       $Title
-    [string]       $Description
-    [string]       $Path
-    [bool]         $Enabled
-    [string]       $CommandLine
-    [string]       $Parameters
-    [RESWMAccCtrl] $AccessControl
-    [string]       $Type
-    [XmlElement]   $FullObject
-    hidden [guid]  $GUID
-    hidden [guid]  $ParentGUID
-
-    RESWMApplication ([string] $Title)
-    {
-        Get-RESWMApplication -Title $Title
-    }
-
-    RESWMApplication ([int] $ObjectID)
-    {
-        Get-RESWMApplication -AppID $ObjectID
-    }
-
-    RESWMApplication ([XmlNode] $XMLNode)
-    {
-        $this.Enabled = $XMLNode.recordenabled -eq 'yes'
-        $this.AppID = $XMLNode.AppID
-        $this.Title = $XMLNode.config.application.configuration.title
-        $this.Description = $XMLNode.config.application.configuration.description
-        $this.CommandLine = $XMLNode.config.application.configuration.commandLine
-        $this.Parameters = $XMLNode.config.application.configuration.parameters
-        $this.AccessControl = $XMLNode.config.application.AccessControl
-        switch -Wildcard ($XMLNode.config.application.configuration.commandline)
-        {
-            *\iexplore.exe {If (!$XMLNode.config.application.configuration.parameters -or 
-                                $XMLNode.config.application.configuration.parameters -notlike '^[-|/]')
-                                {$this.Type = 'URL'}}
-            *\firefox.exe  {If (!$XMLNode.config.application.configuration.parameters -or 
-                                $XMLNode.config.application.configuration.parameters -notlike '^[-|/]')
-                                {$this.Type = 'URL'}}
-            *\chrome.exe   {If (!$XMLNode.config.application.configuration.parameters -or 
-                                $XMLNode.config.application.configuration.parameters -notmatch '^[-|/]')
-                                {$this.Type = 'URL'}}
-            *\mstsc.exe    {If (!$XMLNode.config.application.configuration.parameters -or 
-                                $XMLNode.config.application.configuration.parameters -match '^[-v|/v]')
-                                {$this.Type = 'RDP'}}
-            *\sfttray.exe  {$this.Type = 'AppV4'}
-            %APPVPACK*     {$this.Type = 'AppV5'}
-            \\*            {$this.Type = 'NetworkApp'}
-            Default        {$this.Type = 'LocalApp'}
-        }
-        $this.FullObject = $XMLNode.config.application
-        $this.GUID = $XMLNode.guid
-        If ($XMLNode.parentguid.count -gt 1)
-        {
-            $Parent = $XMLNode.ParentGUID | select -Unique | where {Get-RESWMStartMenu -GUID $_}
-            If ($Parent)
-            {
-                $this.ParentGUID = $Parent
-            }
-        }
-        else
-        {
-            $this.ParentGUID = $XMLNode.parentguid
-        }
-        If ($this.ParentGUID -eq '00000000-0000-0000-0000-000000000000')
-        {
-            $this.Path = 'Start'
-        }
-        else
-        {
-            $this.Path = Get-RESWMStartMenu -GUID $this.ParentGUID
-            If (!$this.Path)
-            {          
-                $this.Path = 'Disabled!'
-            }
-        }
-    }
-}
-
-# Menu folder
-class RESWMMenu
-{
-    [string] $Title
-    [string] $Description
-    [bool]   $Enabled
-    [string] $Path
-    hidden [guid] $GUID
-    hidden [guid] $ParentGUID
-    hidden [guid] $UpdateGUID
-
-    RESWMMenu ([XmlElement] $XMLNode)
-    {
-        foreach ($Property in [RESWMMenu].GetProperties().Name.where({$_ -notlike '*guid'}))
-        {
-            switch ($this.config.applicationmenu.$Property)
-            {
-                yes     {$this.$Property = $true}
-                no      {$this.$Property = $false}
-                default {$this.$Property = $XMLNode.config.applicationmenu.$Property}
-            }
-        }
-        $this.Enabled = $XMLNode.recordenabled -eq 'yes'
-        $this.GUID = $XMLNode.guid
-        $this.ParentGUID = $XMLNode.parentguid
-        $this.UpdateGUID = $XMLNode.updateGUID
-        If ($XMLNode.parentguid -eq '{00000000-0000-0000-0000-000000000000}')
-        {
-            $this.Path = 'Start'
-        }
-        else
-        {
-            $MenuNode = (Select-Xml -Path WMCache:\Objects\app_menus.xml -XPath "//objectinfo[guid = '$($XMLNode.guid)']").Node
-            $arrPath = New-Object System.Collections.ArrayList
-            Do
-            {
-                $MenuNode = (Select-Xml -Path WMCache:\Objects\app_menus.xml -XPath "//objectinfo[guid = '$($MenuNode.parentguid)']").Node
-                If ($MenuNode.guid)
-                {
-                    $null = $arrPath.Add($global:AppMenus[($MenuNode.guid)])
-                }
-            }
-            Until (!$MenuNode.guid)
-            $null = $arrPath.Add('Start')
-            $arrPath.Reverse()
-            $this.Path = $arrPath -join '\'
-        }
-    }
-
-    [string] ToString ()
-    {
-        return $this.Path + '\' + $this.Title
-    }
-}
-
-# PowerZone
-class RESWMZone
-{
-    [string] $Name
-    [string] $Description
-    [object] $Rules
-    [bool]   $Enabled
-    [string] $ObjectDesc
-    hidden [guid] $GUID
-    hidden [guid] $UpdateGUID
-
-    RESWMZone ([XmlElement] $XMLNode)
-    {
-        foreach ($Property in [RESWMZone].GetProperties().Name.where({$_ -notlike '*guid'}))
-        {
-            switch ($XMLNode.config.powerzone.$Property)
-            {
-                yes     {$this.$Property = $true}
-                no      {$this.$Property = $false}
-                default {$this.$Property = $XMLNode.config.powerzone.$Property}
-            }
-        }
-        $this.Enabled = $XMLNode.recordenabled -eq 'yes'
-        $this.GUID = $XMLNode.guid
-        $this.UpdateGUID = $XMLNode.updateGUID
-        $this.Rules = $XMLNode.config.powerzone.powerzonerules.rule
-    }
-
-    [string] ToString ()
-    {
-        return $this.Name
-    }
-}
-
 # AD Organizational Unit
 class RESWMOU
 {
@@ -292,6 +120,177 @@ class RESWMUser
     }
 }
 
+# Application
+class RESWMApplication
+{
+    [int]          $AppID
+    [string]       $Title
+    [string]       $Description
+    [string]       $Path
+    [bool]         $Enabled
+    [bool]         $Hidden
+    [string]       $CommandLine
+    [string]       $Parameters
+    [RESWMAccCtrl] $AccessControl
+    [string]       $Type
+    [XmlElement]   $FullObject
+    hidden [guid]  $GUID
+    hidden [guid]  $ParentGUID
+
+    RESWMApplication ([string] $Title)
+    {
+        Get-RESWMApplication -Title $Title
+    }
+
+    RESWMApplication ([int] $ObjectID)
+    {
+        Get-RESWMApplication -AppID $ObjectID
+    }
+
+    RESWMApplication ([XmlNode] $XMLNode)
+    {
+        $this.Enabled = $XMLNode.recordenabled -eq 'yes'
+        $this.Hidden = $XMLNode.config.application.settings.hidefrommenu -eq 'yes'
+        $this.AppID = $XMLNode.AppID
+        $this.Title = $XMLNode.config.application.configuration.title
+        $this.Description = $XMLNode.config.application.configuration.description
+        $this.CommandLine = $XMLNode.config.application.configuration.commandLine
+        $this.Parameters = $XMLNode.config.application.configuration.parameters
+        $this.AccessControl = $XMLNode.config.application.AccessControl
+        switch -Wildcard ($XMLNode.config.application.configuration.commandline)
+        {
+            *\mstsc.exe    {If (!$this.Parameters -or 
+                                $this.Parameters -match '^[-v|/v]')
+                                {$this.Type = 'RDP'}}
+            *\sfttray.exe  {$this.Type = 'AppV4'}
+            %APPVPACK*     {$this.Type = 'AppV5'}
+            \\*            {$this.Type = 'NetworkApp'}
+            Default        {If ($this.Parameters -match 'https*\://' -or 
+                                $this.CommandLine -match 'https*\://')
+                            {$this.Type = 'URL'}
+                            else{$this.Type = 'LocalApp'}
+                           }
+        }
+        $this.FullObject = $XMLNode.config.application
+        $this.GUID = $XMLNode.guid
+        If ($XMLNode.parentguid.count -gt 1)
+        {
+            $Parent = $XMLNode.ParentGUID | select -Unique | where {Get-RESWMStartMenu -GUID $_}
+            If ($Parent)
+            {
+                $this.ParentGUID = $Parent
+            }
+        }
+        else
+        {
+            $this.ParentGUID = $XMLNode.parentguid
+        }
+        If ($this.ParentGUID -eq '00000000-0000-0000-0000-000000000000')
+        {
+            $this.Path = 'Start'
+        }
+        else
+        {
+            $this.Path = Get-RESWMStartMenu -GUID $this.ParentGUID
+            If (!$this.Path)
+            {          
+                $this.Path = 'Disabled!'
+            }
+        }
+    }
+}
+
+# Menu folder
+class RESWMMenu
+{
+    [string] $Title
+    [string] $Description
+    [bool]   $Enabled
+    [string] $Path
+    hidden [guid] $GUID
+    hidden [guid] $ParentGUID
+    hidden [guid] $UpdateGUID
+
+    RESWMMenu ([XmlElement] $XMLNode)
+    {
+        foreach ($Property in [RESWMMenu].GetProperties().Name.where({$_ -notlike '*guid'}))
+        {
+            switch ($this.config.applicationmenu.$Property)
+            {
+                yes     {$this.$Property = $true}
+                no      {$this.$Property = $false}
+                default {$this.$Property = $XMLNode.config.applicationmenu.$Property}
+            }
+        }
+        $this.Enabled = $XMLNode.recordenabled -eq 'yes'
+        $this.GUID = $XMLNode.guid
+        $this.ParentGUID = $XMLNode.parentguid
+        $this.UpdateGUID = $XMLNode.updateGUID
+        If ($XMLNode.parentguid -eq '{00000000-0000-0000-0000-000000000000}')
+        {
+            $this.Path = 'Start'
+        }
+        else
+        {
+            $SubFolder = Get-ChildItem WMCache: | sort LastWriteTime | select -Last 1 -ExpandProperty Name
+            $MenuNode = (Select-Xml -Path WMCache:\$SubFolder\Objects\app_menus.xml -XPath "//objectinfo[guid = '$($XMLNode.guid)']").Node
+            $arrPath = New-Object System.Collections.ArrayList
+            Do
+            {
+                $MenuNode = (Select-Xml -Path WMCache:\$SubFolder\Objects\app_menus.xml -XPath "//objectinfo[guid = '$($MenuNode.parentguid)']").Node
+                If ($MenuNode.guid)
+                {
+                    $null = $arrPath.Add($global:AppMenus[($MenuNode.guid)])
+                }
+            }
+            Until (!$MenuNode.guid)
+            $null = $arrPath.Add('Start')
+            $arrPath.Reverse()
+            $this.Path = $arrPath -join '\'
+        }
+    }
+
+    [string] ToString ()
+    {
+        return $this.Path + '\' + $this.Title
+    }
+}
+
+# PowerZone
+class RESWMZone
+{
+    [string] $Name
+    [string] $Description
+    [object] $Rules
+    [bool]   $Enabled
+    [string] $ObjectDesc
+    hidden [guid] $GUID
+    hidden [guid] $UpdateGUID
+
+    RESWMZone ([XmlElement] $XMLNode)
+    {
+        foreach ($Property in [RESWMZone].GetProperties().Name.where({$_ -notlike '*guid'}))
+        {
+            switch ($XMLNode.config.powerzone.$Property)
+            {
+                yes     {$this.$Property = $true}
+                no      {$this.$Property = $false}
+                default {$this.$Property = $XMLNode.config.powerzone.$Property}
+            }
+        }
+        $this.Enabled = $XMLNode.recordenabled -eq 'yes'
+        $this.GUID = $XMLNode.guid
+        $this.UpdateGUID = $XMLNode.updateGUID
+        $this.Rules = $XMLNode.config.powerzone.powerzonerules.rule
+    }
+
+    [string] ToString ()
+    {
+        return $this.Name
+    }
+}
+
+# Access Control
 class RESWMAccCtrl
 {
     [string] $AccessMode
@@ -308,7 +307,7 @@ class RESWMAccCtrl
             group     {$this.Access = $XMLNode.grouplist.group}
             secrole   {$this.Access = $XMLNode.secroles.secrole.foreach({[RESWMAccess]::new('SecurityRole',$_)})}
             delegated {$this.Access = @($XMLNode.appmanlist.appmanglobal).foreach({
-                            [RESWMAccess]::new($_,'Delegated')})}
+                                            [RESWMAccess]::new($_,'Delegated')})}
             ou        {$this.Access = $XMLNode.oufingerprint.ou}
             default   {$this.Access = $XMLNode.access}
         }
@@ -331,6 +330,7 @@ class RESWMAccCtrl
     }
 }
 
+# Access
 class RESWMAccess
 {
     [string]   $Type
@@ -411,6 +411,7 @@ class RESWMAccess
     }
 }
 
+#Security Role
 class RESWMSecRole
 {
     [string]      $Name
@@ -439,7 +440,8 @@ class RESWMSecRole
     }
 }
 
-class RESWMMapping
+# Drive Mapping
+class RESWMMapping #Scope
 {
     [string] $Device
     [string] $Description
@@ -455,6 +457,7 @@ class RESWMMapping
     [string] $PasswordLong
     [bool]   $Prompt
     [string] $State
+    [string] $Scope
     hidden [int]  $Order
     hidden [guid] $GUID
     hidden [guid] $UpdateGUID
@@ -475,6 +478,11 @@ class RESWMMapping
         $this.GUID = $XMLNode.guid
         $this.ParentGUID = $XMLNode.parentguid
         $this.UpdateGUID = $XMLNode.updateGUID
+        switch ($this.ParentGuid)
+        {
+            ([guid]::Empty) {$this.Scope = 'Global'}
+            default {$this.Scope = 'Application'}
+        }
     }
 
     [string] ToString()
@@ -483,6 +491,7 @@ class RESWMMapping
     }
 }
 
+# User Preference (Zero-Profile)
 class RESWMUserPref
 {
     [string] $Name
@@ -534,7 +543,7 @@ class RESWMUserPref
     }
 }
 
-class RESWMRegistry
+class RESWMRegistry #Scope
 {
     [int]          $Order
     [string]       $Name
@@ -542,7 +551,7 @@ class RESWMRegistry
     [RESWMAccCtrl] $AccessControl
     [bool]         $Enabled
     [string]       $Type
-    [string]       $Location
+    [string]       $Scope
     [Registry[]]   $Registry
     [string]       $State
     [string]       $ObjectDesc
@@ -569,10 +578,10 @@ class RESWMRegistry
         $this.Order = $XMLNode.order
         $this.ParentGUID = $XMLNode.parentguid
         $this.UpdateGUID = $XMLNode.updateGUID
-        switch ($this.ParentGuid.ToString())
+        switch ($this.ParentGuid)
         {
-            00000000-0000-0000-0000-000000000000 {$this.Location = 'Global'}
-            default {$this.Location = 'Application'}
+            ([guid]::Empty) {$this.Scope = 'Global'}
+            default {$this.Scope = 'Application'}
         }
         $this.File = $XMLNode.config.registry.registryfile
         $this.Registry = Get-WMREGFile $this.File
@@ -618,7 +627,7 @@ class Registry
 }
 
 # Printer
-class RESWMPrinter
+class RESWMPrinter #scope
 {
     [string] $Printer
     [string] $BackupPrinter
@@ -635,6 +644,7 @@ class RESWMPrinter
     [string] $PrinterPreference
     [string] $State
     [bool]   $WaitForTask
+    [string] $Scope
     hidden [guid] $GUID
     hidden [guid] $ParentGUID
     hidden [guid] $UpdateGUID
@@ -655,11 +665,107 @@ class RESWMPrinter
         $this.GUID = $XMLNode.guid
         $this.ParentGUID = $XMLNode.parentguid
         $this.UpdateGUID = $XMLNode.updateGUID
+        switch ($this.ParentGuid)
+        {
+            ([guid]::Empty) {$this.Scope = 'Global'}
+            default {$this.Scope = 'Application'}
+        }
     }
 
     [string] ToString ()
     {
         return $this.Printer
+    }
+}
+
+# Variable
+class RESWMVariable #Scope
+{
+    [int]    $Order
+    [string] $Name
+    [string] $Description
+    [string] $Value
+    [RESWMAccCtrl] $AccessControl
+    [bool]   $Enabled
+    [string] $State
+    [string] $Scope
+    hidden [guid] $GUID
+    hidden [guid] $ParentGUID
+    hidden [guid] $UpdateGUID
+
+    RESWMVariable ([XmlElement] $XMLNode)
+    {
+        foreach ($Property in [RESWMVariable].GetProperties().Name.where({$_ -notlike '*guid'}))
+        {
+            switch ($XMLNode.config.variable.$Property)
+            {
+                yes     {$this.$Property = $true}
+                no      {$this.$Property = $false}
+                default {$this.$Property = $XMLNode.config.variable.$Property}
+            }
+        }
+        $this.Enabled = $XMLNode.recordenabled -eq 'yes'
+        $this.GUID = $XMLNode.guid
+        $this.ParentGUID = $XMLNode.parentguid
+        $this.UpdateGUID = $XMLNode.updateGUID
+        $this.Order = $XMLNode.order
+        switch ($this.ParentGuid)
+        {
+            ([guid]::Empty) {$this.Scope = 'Global'}
+            default {$this.Scope = 'Application'}
+        }
+    }
+
+    [string] ToString ()
+    {
+        return $this.Name
+    }
+}
+
+# Task
+class RESWMTask #Scope
+{
+    [int]    $Order
+    [string] $Description
+    [string] $CommandLine
+    [string] $Script
+    [string] $Extension
+    [RESWMAccCtrl] $AccessControl
+    [bool]   $WaitForApplication
+    [bool]   $Enabled
+    [string] $State
+    [string] $Scope
+    hidden [guid] $GUID
+    hidden [guid] $ParentGUID
+    hidden [guid] $UpdateGUID
+
+    RESWMVariable ([XmlElement] $XMLNode)
+    {
+        foreach ($Property in [RESWMVariable].GetProperties().Name.where({$_ -notlike '*guid'}))
+        {
+            switch ($XMLNode.config.variable.$Property)
+            {
+                yes     {$this.$Property = $true}
+                no      {$this.$Property = $false}
+                default {$this.$Property = $XMLNode.config.variable.$Property}
+            }
+        }
+        $this.Enabled = $XMLNode.recordenabled -eq 'yes'
+        $this.GUID = $XMLNode.guid
+        $this.Extension = $XMLNode.scriptext
+        $this.ParentGUID = $XMLNode.parentguid
+        $this.UpdateGUID = $XMLNode.updateGUID
+        $this.Order = $XMLNode.order
+        switch ($this.ParentGuid)
+        {
+            ([guid]::Empty) {$this.Scope = 'Global'}
+            default {$this.Scope = 'Application'}
+        }
+    }
+
+    [string] ToString ()
+    {
+        return $this.Name
     }
 }
 
