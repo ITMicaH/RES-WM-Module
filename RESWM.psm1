@@ -1060,9 +1060,9 @@ function Get-RESWMPrinter
         Source = 'Objects\pl_prn.xml'
         Type = 'printermapping'
     }
-    If ($PSBoundParameters['Name'])
+    If ($PSBoundParameters['Printer'])
     {
-        $Params.Add('Filter',"config/printermapping/printer = '$Name'")
+        $Params.Add('Filter',"config/printermapping/printer = '$Printer'")
     }
     elseif ($PSBoundParameters['GUID'])
     {
@@ -1365,9 +1365,23 @@ function Get-RESWMUserPreferenceFiles
         else
         {
             If ($Drive = Get-RESWMMapping -User $User | where Device -EQ "$($ZeroProfilePath.Substring(0,1)):")
-            {        
-                $ShareName = $Drive.ShareName.replace('%USERNAME%',$User.Name)
-                $Root = "$ShareName\$(Split-Path $ZeroProfilePath -Leaf)"
+            {
+                If ($Drive.Count -gt 1)
+                {
+                    $Drive.foreach{
+                        $ShareName = $_.ShareName.replace('%USERNAME%',$User.Name)
+                        $Root = "$ShareName\$(Split-Path $ZeroProfilePath -Leaf)"
+                        if (Test-Path $Root)
+                        {
+                            continue
+                        }
+                    }
+                }
+                else
+                {
+                    $ShareName = $Drive.ShareName.replace('%USERNAME%',$User.Name)
+                    $Root = "$ShareName\$(Split-Path $ZeroProfilePath -Leaf)"
+                }
             }
             else
             {
@@ -1536,3 +1550,63 @@ function Reset-RESWMUserPreference
 }
 
 #endregion Functions
+
+class RESWMRegistry #Scope
+{
+    [int]          $Order
+    [string]       $Name
+    [string]       $Description
+    [RESWMAccCtrl] $AccessControl
+    [bool]         $Enabled
+    [string]       $Type
+    [string]       $Scope
+    [Registry[]]   $Registry
+    [string]       $State
+    [string]       $ObjectDesc
+    [bool]         $Runonce
+    [string]       $RunonceFile
+    hidden [guid]  $ParentGuid
+    hidden [guid]  $GUID
+    hidden [guid]  $UpdateGuid
+    hidden [string]$File
+
+    RESWMRegistry ([XmlElement] $XMLNode)
+    {
+        foreach ($Property in [RESWMRegistry].GetProperties().Name.where({$_ -notlike '*guid'}))
+        {
+            switch ($XMLNode.config.registry.$Property)
+            {
+                yes     {$this.$Property = $true}
+                no      {$this.$Property = $false}
+                default {$this.$Property = $XMLNode.config.registry.$Property}
+            }
+        }
+        $this.Enabled = $XMLNode.recordenabled -eq 'yes'
+        $this.GUID = $XMLNode.guid
+        $this.Order = $XMLNode.order
+        $this.ParentGUID = $XMLNode.parentguid
+        $this.UpdateGUID = $XMLNode.updateGUID
+        switch ($this.ParentGuid)
+        {
+            ([guid]::Empty) {$this.Scope = 'Global'}
+            default {$this.Scope = 'Application'}
+        }
+        $this.File = $XMLNode.config.registry.registryfile
+        $this.Registry = Get-WMREGFile $this.File
+        If (!$this.State)
+        {
+            $this.State = 'Both'
+        }
+    }
+
+    # Show content of the Registry file
+    [string[]] GetRegfileContent()
+    {
+        return (Get-WMREGFile $this.File -ShowContent)
+    }
+
+    [System.IO.FileInfo] SaveRegfile ([string]$Path)
+    {
+        return (Get-WMREGFile $this.File -SaveFile $Path)
+    }
+}
